@@ -1,0 +1,360 @@
+;
+	.title	VFORTH	Forth 2012 for VAX/VMS
+	.ident	/V0.1/
+;******************************************************************************
+;
+; VFORTH -- a Forth 2012 System for VAX/VMS
+;
+;	Program:	V F M A C R O S . M A R  (first of the VFORTH sources)
+;	Version:	V0.1
+;
+; Description:
+;     VFORTH implements the Forth 2012 standard in VAX MACRO, using
+; subroutine threading, like VTIL, the VAX Threaded Interpretive Language
+; written in 1988 that this system takes its lessons from.  A colon
+; definition is a sequence of JSB instructions, literals are MOVL
+; instructions, and control structures are compiled to VAX branches.
+;
+;     The sources are assembled together as one module:
+;	MACRO/OBJECT=VFORTH VFMACROS+VFDATA+VFCORE+...+VFMAIN
+; (see DESCRIP.MMS), so the header macro can link the built-in words
+; into their word lists at assembly time.  VFDBG.MAR assembled first
+; defines ca_debug and builds VFORTHDBG.EXE, which leaves out the
+; condition handler so the debugger sees exceptions itself.
+;
+;******************************************************************************
+;!> VFMACROS.MAR -- definitions and macros shared by all the VFORTH sources.
+
+	.macro	newpage subtitle
+	.page
+	.sbttl	subtitle
+	.endm
+
+	newpage	<Conditional Assembly Control Symbols>
+;******************************************************************************
+;
+; Conditional Assembly Control Symbols
+;
+;******************************************************************************
+	.if	ndf	ca_debug	; VFDBG.MAR defines ca_debug
+ca_trapping = 0			; If defined, the condition handler that turns
+				; VMS exceptions into THROW codes is set up.
+	.endc
+
+	newpage	<External Symbols>
+;******************************************************************************
+;
+; External Symbols
+;
+;******************************************************************************
+	.dsabl	global
+	.extrn	lib$get_input, lib$put_output, lib$signal, lib$stop
+	.extrn	lib$get_foreign, lib$get_vm, lib$free_vm
+	.extrn	lib$_inpstrtru
+	.extrn	smg$create_virtual_keyboard, smg$read_composed_line
+	.extrn	smg$cancel_input, smg$_eof
+	$chfdef				; condition handling facility
+	$ssdef				; system service status codes
+	$iodef				; I/O function codes
+	$dvidef				; $GETDVI item codes
+	$dcdef				; device classes
+	$prtdef				; page protection codes
+	$fabdef				; RMS file access block
+	$rabdef				; RMS record access block
+	$namdef				; RMS name block
+	$xabdef				; RMS extended attribute blocks
+	$xabfhcdef			; RMS file header characteristics
+	$rmsdef				; RMS status codes
+	$ttdef				; terminal characteristics
+	$trmdef				; terminal read modifiers
+	$stsdef				; status code fields
+	$dscdef				; descriptors
+	$psldef				; processor status longword
+
+	newpage	<Implementation Notes>
+;******************************************************************************
+;
+; Implementation Notes
+;
+;******************************************************************************
+;
+; Registers
+;	r11	-- data stack pointer.  The stack grows down and the top item
+;		   is at (r11), so ( n1 n2 ) has n2 at (r11) and n1 at 4(r11).
+;	r10	-- locals frame pointer of the definition now running.
+;	r9	-- floating-point stack pointer (8-byte G_floating items).
+;	sp	-- return stack.  Words are called with JSB and return with
+;		   RSB, so the return stack holds return addresses, loop
+;		   parameters, >R items, CATCH frames and locals frames.  It is
+;		   not the VMS user stack: VFORTH switches SP to its own region,
+;		   which has no-access guard pages below it.
+;	r0-r8	-- scratch.  Any word may change them.
+;	fp, ap	-- left alone, since VMS uses FP to find condition handlers.
+;
+; Header format of a word.  The name token (nt) is the address of the link.
+;	long	-- link to the nt of the previous word in this word list,
+;		   0 at the end
+;	byte	-- length of the name, 1 to 127; bit 7 set hides the word
+;		   while it is being defined
+;	bytes	-- the name
+;	byte	-- flags (f_*), always the byte just before the xt
+;	code	-- the execution token (xt) is the address of the code
+;	data	-- a CREATEd word's code is "JSB @#do_create", 6 bytes, so its
+;		   data field (body) is at xt+6.  Headers are placed so that
+;		   xt+6 is cell aligned.
+;
+; Flags byte
+;	f_imm	-- IMMEDIATE
+;	f_conly	-- compile only: interpreting it is error -14
+;	f_alt	-- the inline code is at xt+2, after a BRB over it
+;	low 5 bits -- length of the inline code; COMPILE, copies this many
+;		   bytes of code instead of compiling a JSB to the word.
+;		   Without f_alt the inline code is the word's own code, which
+;		   then ends in an RSB, so it must be position independent:
+;		   it can use local branches and absolute (@# or #) addresses,
+;		   but not PC-relative references to anything outside itself.
+;
+; Names in the MACRO source:
+;	<name>	   -- a word whose name is a valid MACRO symbol
+;	w_<name>   -- a word whose name is not (w_store = !, w_plus = +)
+;	do_<name>  -- run-time code that compiled code JSBs to
+;	s_<name>   -- internal subroutine reached by JSB
+;	r_<name>   -- internal routine reached by a branch
+;	v_<name>   -- variables
+;	c_<name>   -- constants
+;	vl_<name>  -- assembly-time word list links used by the header macro
+;
+; Each word has a header comment:
+;	;+++
+;	;x> name -- ( stack effect ) what it does
+;	;---
+; where x is the word set: c core, d double, e exception, f facility,
+; F floating, i file, b block, l locals, m memory, o search order,
+; s string, t tools, x xchar, v VFORTH's own, and r/s for internal
+; routines and subroutines.
+;
+;******************************************************************************
+
+	newpage	<Constants>
+;******************************************************************************
+;
+; Constants
+;
+;******************************************************************************
+c_true		= -1			; Forth true flag
+c_false		= 0			; Forth false flag
+c_cell		= 4			; bytes in a cell
+c_bl		= 32			; ASCII space
+c_maxname	= 127			; longest name
+c_tibsize	= 1024			; size of the terminal input buffer
+c_linesize	= 1024			; size of a file's line buffer
+c_padsize	= 1024			; size of PAD
+c_holdsize	= 256			; size of the pictured numeric buffer
+c_wordsize	= 258			; size of WORD's buffer
+c_sbufsize	= 1024			; size of each S" buffer
+c_nsbufs	= 4			; number of S" buffers
+c_outsize	= 1024			; size of the terminal output buffer
+c_maxorder	= 16			; most word lists in the search order
+c_maxlocals	= 32			; most locals in a definition
+c_dictsize	= 4096*512		; dictionary size: 2 Mbytes
+c_dictmargin	= 4096			; dictionary overflow margin
+c_probe		= 12288			; how far below SP a definition probes
+c_ds_cells	= 16384			; data stack cells
+c_rs_bytes	= 512*512		; return stack size in bytes
+c_fs_items	= 4096			; floating-point stack items
+c_guard		= 16*512		; size of a data stack guard
+c_rsguard	= 32*512		; size of the return stack's low guard
+c_maxerrs	= 0			; (unused) see v_errors
+c_nbuffers	= 8			; number of block buffers
+c_blocksize	= 1024			; size of a block
+
+;
+; Flags in the flags byte (just before the xt)
+;
+f_imm		= ^x80			; IMMEDIATE
+f_conly		= ^x40			; compile only
+f_alt		= ^x20			; inline code at xt+2
+m_inlen		= ^x1f			; mask for the inline code length
+h_hidden	= ^x80			; hidden bit in the name length byte
+m_namelen	= ^x7f			; mask for the name length
+
+;
+; Opcodes and operand specifiers for the code the compiler generates.
+;
+op_rsb		= ^x05
+op_mnegl	= ^xce
+op_tstl		= ^xd5
+op_movl		= ^xd0
+op_jsb		= ^x16
+op_jmp		= ^x17
+op_bneq		= ^x12
+op_beql		= ^x13
+op_bvs		= ^x1d
+op_incl		= ^xd6
+op_addl2	= ^xc0
+op_addl3	= ^xc1
+op_cmpl		= ^xd1
+op_pushl	= ^xdd
+op_movq		= ^x7d
+adm_abs		= ^x9f			; @#address
+adm_imm		= ^x8f			; #immediate
+adm_ainc_r11	= ^x8b			; (r11)+
+adm_adec_r11	= ^x7b			; -(r11)
+adm_def_r11	= ^x6b			; (r11)
+adm_ainc_sp	= ^x8e			; (sp)+
+adm_def_sp	= ^x6e			; (sp)
+adm_wdisp_sp	= ^xce			; w^disp(sp)
+adm_bdisp_r10	= ^xaa			; b^disp(r10)
+adm_r10		= ^x5a			; r10
+adm_sp		= ^x5e			; sp
+adm_r11		= ^x5b			; r11
+adm_ainc_r9	= ^x89			; (r9)+
+adm_adec_r9	= ^x79			; -(r9)
+
+;
+; Forth THROW codes the system itself raises.
+;
+t_abort		= -1
+t_aborts	= -2			; ABORT"
+t_dsover	= -3
+t_dsunder	= -4
+t_rsover	= -5
+t_rsunder	= -6
+t_dictover	= -8
+t_badaddr	= -9
+t_divzero	= -10
+t_range		= -11
+t_undef		= -13
+t_conly		= -14
+t_badforget	= -15
+t_noname	= -16
+t_holdover	= -17
+t_parseover	= -18
+t_longname	= -19
+t_unsup		= -21
+t_ctlmismatch	= -22
+t_badnum	= -24
+t_rsimbal	= -25
+t_interrupt	= -28
+t_nesting	= -29
+t_notcreated	= -31
+t_badname	= -32
+t_blockread	= -33
+t_blockwrite	= -34
+t_badblock	= -35
+t_badpos	= -36
+t_fileio	= -37
+t_nofile	= -38
+t_eof		= -39
+t_fbase		= -40
+t_fdivzero	= -42
+t_frange	= -43
+t_fsover	= -44
+t_fsunder	= -45
+t_finvalid	= -46
+t_badpostpone	= -48
+t_orderover	= -49
+t_orderunder	= -50
+t_funder	= -54
+t_ffault	= -55
+t_quit		= -56
+t_charerr	= -57
+t_ifelse	= -58
+t_badxchar	= -77
+t_subst		= -78
+t_replaces	= -79
+
+	newpage	<Macros>
+;******************************************************************************
+;
+; Macros
+;
+;******************************************************************************
+;
+; Assembly-time word list links: each holds the nt of the word most recently
+; defined in that word list by the header macro, so the built-in word lists
+; end with a null link.
+;
+vl_forth = 0			; the FORTH word list
+vl_env = 0			; ENVIRONMENT? queries
+
+;+++
+;m> defword -- lay down the header of a built-in word.
+;	lbl	the MACRO label of the xt
+;	name	the Forth name, passed as ^~name~ when it has special
+;		characters (none of the names contains `~' except F~,
+;		which is written out by hand)
+;	flags	f_imm and/or f_conly
+;	inl	nonzero if the word's code (up to the label lbl_e, before its
+;		RSB) can be compiled inline
+;	wl	the word list (forth or env)
+;---
+	.macro	defword	lbl,name,flags=0,inl=0,wl=forth
+	.long	vl_'wl			; link to the previous word
+	vl_'wl = . - 4			; this word is now the latest
+	.nchr	vf_nc,^~name~		; length of the name
+	.byte	vf_nc
+	.ascii	~name~
+	.if	ne,inl
+	.byte	<flags>!<lbl'_e-lbl>	; flags and inline length
+	.if_false
+	.byte	flags
+	.endc
+lbl:
+	.endm	defword
+
+;+++
+;m> defalt -- lay down the header of a word whose inline code is not its
+;	own code: the code at the xt branches over the inline bytes, which
+;	end at lbl_e, to the out-of-line code.
+;---
+	.macro	defalt	lbl,name,flags=0
+	.long	vl_forth
+	vl_forth = . - 4
+	.nchr	vf_nc,^~name~
+	.byte	vf_nc
+	.ascii	~name~
+	.byte	<flags>!f_alt!<lbl'_e-lbl-2>
+lbl:
+	brb	lbl'_o			; out-of-line code follows the inline
+	.endm	defalt
+
+;+++
+;m> pushl_ds -- push a value on the data stack.
+;---
+	.macro	push	src
+	movl	src,-(r11)
+	.endm	push
+
+	.macro	pop	dst
+	movl	(r11)+,dst
+	.endm	pop
+
+;+++
+;m> throw -- THROW the code given (a Forth THROW code).
+;---
+	.macro	throw	code
+	movl	#code,r0
+	brw	r_throw_r0
+	.endm	throw
+
+;+++
+;m> descriptor -- a static string descriptor
+;---
+	.macro	descriptor len=0,addr=0
+	.word	len
+	.byte	dsc$k_dtype_t,dsc$k_class_s
+	.long	addr
+	.endm	descriptor
+
+;+++
+;m> cstring -- a counted string (count byte, then text)
+;---
+	.macro	cstring	text
+	.nchr	vf_nc,^~text~
+	.byte	vf_nc
+	.ascii	~text~
+	.endm	cstring
+
+dsc$k_dtype_t = 14			; text
+dsc$k_class_s = 1			; static

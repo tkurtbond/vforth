@@ -1,0 +1,760 @@
+	newpage	<The Text Interpreter>
+;******************************************************************************
+;
+; VFINTERP.MAR -- parsing, finding words, the text interpreter, the input
+; source, CATCH and THROW, QUIT and the error messages.
+;
+;******************************************************************************
+	.psect	vf_code
+
+;
+; v_upper -- a table mapping each character to its uppercase form, so
+;	names can be compared without regard to case.
+;
+v_upper:
+	vf_i = 0
+	.rept	97
+	.byte	vf_i
+	vf_i = vf_i+1
+	.endr
+	.rept	26
+	.byte	vf_i-32
+	vf_i = vf_i+1
+	.endr
+	.rept	133
+	.byte	vf_i
+	vf_i = vf_i+1
+	.endr
+
+	newpage	<Input Source>
+;+++
+;c> SOURCE -- ( -- c-addr u )
+;---
+	defword	source,^~SOURCE~
+	movl	v_srcaddr,-(r11)
+	movl	v_srclen,-(r11)
+	rsb
+
+;+++
+;c> >IN -- ( -- a-addr )
+;---
+	defword	toin,^~>IN~,inl=1
+	movl	#v_toin,-(r11)
+toin_e:	rsb
+
+;+++
+;c> SOURCE-ID -- ( -- 0 | -1 | fileid )
+;---
+	defword	sourceid,^~SOURCE-ID~
+	movl	v_srcid,-(r11)
+	rsb
+
+;+++
+;c> STATE -- ( -- a-addr )
+;---
+	defword	state,^~STATE~,inl=1
+	movl	#v_state,-(r11)
+state_e: rsb
+
+;+++
+;b> BLK -- ( -- a-addr )
+;---
+	defword	blk,^~BLK~,inl=1
+	movl	#v_blk,-(r11)
+blk_e:	rsb
+
+;+++
+;c> REFILL -- ( -- flag ) refill the input buffer from the input source.
+;---
+	defword	refill,^~REFILL~
+	tstl	v_blk			; loading a block?
+	beql	10$			; no
+	incl	v_blk			; yes, the next block
+	movl	v_blk,-(r11)
+	jsb	block
+	movl	(r11)+,v_srcaddr
+	movl	#c_blocksize,v_srclen
+	clrl	v_toin
+	mnegl	#1,-(r11)
+	rsb
+10$:	movl	v_srcid,r0
+	bneq	20$
+	moval	v_tib,r6		; the user input device
+	movl	#c_tibsize,r7
+	jsb	s_getline
+	tstl	r0
+	blss	40$			; end of input
+	moval	v_tib,v_srcaddr
+	movl	r7,v_srclen
+	clrl	v_toin
+	mnegl	#1,-(r11)
+	rsb
+20$:	cmpl	r0,#-1			; a string?
+	beql	40$			; yes, it can't be refilled
+	jsb	s_fillline		; a file
+	tstl	r0
+	beql	40$
+	clrl	v_toin
+	mnegl	#1,-(r11)
+	rsb
+40$:	clrl	-(r11)
+	rsb
+
+	newpage	<Parsing>
+;+++
+;s> s_skipws -- skip blanks (and control characters) in the source.
+;	r6 = address of the rest of the source, r7 = its length.
+;---
+s_skipws:
+	addl3	v_srcaddr,v_toin,r6
+	subl3	v_toin,v_srclen,r7
+	bleq	20$
+10$:	cmpb	(r6),#c_bl
+	bgtru	20$
+	incl	r6
+	incl	v_toin
+	sobgtr	r7,10$
+20$:	rsb
+
+;+++
+;c> PARSE-NAME -- ( "<spaces>name<space>" -- c-addr u )
+;---
+	defword	parsename,^~PARSE-NAME~
+	jsb	s_skipws
+	movl	r6,-(r11)		; start of the name
+	clrl	r1			; its length
+	tstl	r7
+	bleq	30$
+10$:	cmpb	(r6)+,#c_bl
+	blequ	20$
+	incl	r1
+	sobgtr	r7,10$
+	brb	30$
+20$:	incl	v_toin			; skip the delimiter
+30$:	addl2	r1,v_toin
+	movl	r1,-(r11)
+	rsb
+
+;+++
+;c> PARSE -- ( char "ccc<char>" -- c-addr u )
+;	When char is a space, any control character delimits too.
+;---
+	defword	parse,^~PARSE~
+	movl	(r11),r2		; delimiter
+	addl3	v_srcaddr,v_toin,r6
+	movl	r6,(r11)
+	subl3	v_toin,v_srclen,r7
+	clrl	r1
+	tstl	r7
+	bleq	30$
+10$:	movzbl	(r6)+,r0
+	cmpl	r0,r2
+	beql	20$
+	cmpl	r2,#c_bl
+	bneq	15$
+	cmpl	r0,#c_bl
+	blequ	20$
+15$:	incl	r1
+	sobgtr	r7,10$
+	brb	30$
+20$:	incl	v_toin
+30$:	addl2	r1,v_toin
+	movl	r1,-(r11)
+	rsb
+
+;+++
+;c> WORD -- ( char "<chars>ccc<char>" -- c-addr )
+;---
+	defword	word,^~WORD~
+	movl	(r11),r2		; delimiter
+	addl3	v_srcaddr,v_toin,r6
+	subl3	v_toin,v_srclen,r7
+	bleq	5$
+1$:	movzbl	(r6),r0			; skip leading delimiters
+	cmpl	r0,r2
+	beql	2$
+	cmpl	r2,#c_bl
+	bneq	5$
+	cmpl	r0,#c_bl
+	bgtru	5$
+2$:	incl	r6
+	incl	v_toin
+	sobgtr	r7,1$
+5$:	movl	r2,(r11)
+	jsb	parse
+	movl	(r11)+,r7
+	movl	(r11),r6
+	cmpl	r7,#255
+	blequ	10$
+	throw	t_parseover
+10$:	moval	v_wordbuf,r8
+	movl	r8,(r11)
+	movb	r7,(r8)+
+	movc3	r7,(r6),(r8)
+	movb	#c_bl,(r3)		; a space after it
+	rsb
+
+	newpage	<Finding Words>
+;+++
+;s> s_search -- search one word list for a name.
+;	in:	r6 = address, r7 = length of the name, r8 = wid
+;	out:	r0 = nt, or 0; condition codes set by r0
+;	Uses r1-r5.
+;---
+s_search:
+	cmpl	r7,#c_maxname		; too long to be a name?
+	bgtru	90$
+	movl	(r8),r0
+10$:	beql	90$
+	movzbl	4(r0),r1		; length, with the hidden bit
+	cmpl	r1,r7
+	bneq	50$
+	movab	5(r0),r2
+	movl	r6,r3
+	movl	r7,r4
+	beql	50$
+20$:	movzbl	(r2)+,r5
+	movzbl	(r3)+,r1
+	cmpb	v_upper[r5],v_upper[r1]
+	bneq	50$
+	sobgtr	r4,20$
+	tstl	r0
+	rsb
+50$:	movl	(r0),r0
+	brb	10$
+90$:	clrl	r0
+	rsb
+
+;+++
+;s> s_find -- search the search order for the name r6, r7.
+;	out:	r0 = nt or 0, with the condition codes.  Uses r1-r5, r8.
+;---
+s_find:	pushl	r9
+	clrl	r9
+10$:	cmpl	r9,v_norder
+	bgeq	20$
+	movl	v_order[r9],r8
+	jsb	s_search
+	bneq	30$
+	incl	r9
+	brb	10$
+20$:	clrl	r0
+30$:	movl	(sp)+,r9
+	tstl	r0
+	rsb
+
+;+++
+;s> s_ntxt -- r1 = the xt of the nt in r0.
+;---
+s_ntxt:	movzbl	4(r0),r1
+	bicl2	#h_hidden,r1
+	addl2	r0,r1
+	addl2	#6,r1
+	rsb
+
+;+++
+;c> FIND -- ( c-addr -- c-addr 0 | xt 1 | xt -1 )
+;---
+	defword	find,^~FIND~
+	movl	(r11),r6
+	movzbl	(r6)+,r7
+	jsb	s_find
+	beql	10$
+	jsb	s_ntxt
+	movl	r1,(r11)
+	mnegl	#1,-(r11)
+	bitb	#f_imm,-1(r1)
+	beql	5$
+	movl	#1,(r11)
+5$:	rsb
+10$:	clrl	-(r11)
+	rsb
+
+;+++
+;o> SEARCH-WORDLIST -- ( c-addr u wid -- 0 | xt 1 | xt -1 )
+;---
+	defword	searchwordlist,^~SEARCH-WORDLIST~
+	movl	(r11)+,r8
+	movl	(r11)+,r7
+	movl	(r11),r6
+	jsb	s_search
+	beql	10$
+	jsb	s_ntxt
+	movl	r1,(r11)
+	mnegl	#1,-(r11)
+	bitb	#f_imm,-1(r1)
+	beql	5$
+	movl	#1,(r11)
+5$:	rsb
+10$:	clrl	(r11)
+	rsb
+
+;+++
+;s> s_findname -- parse a name and find it, throwing -13 if it isn't
+;	there.  out: r0 = nt, r1 = xt.  Also ( -- ) on the data stack.
+;---
+s_findname:
+	jsb	parsename
+	movl	(r11)+,r7
+	movl	(r11)+,r6
+	movl	r6,v_errname
+	movl	r7,v_errname+4
+	tstl	r7
+	bneq	10$
+	throw	t_noname
+10$:	jsb	s_find
+	bneq	20$
+	throw	t_undef
+20$:	brw	s_ntxt
+
+;+++
+;c> ' -- ( "name" -- xt )
+;---
+	defword	tick,^~'~
+	jsb	s_findname
+	movl	r1,-(r11)
+	rsb
+
+	newpage	<The Interpreter Loop>
+;+++
+;v> INTERPRET -- ( i*x -- j*x ) interpret the rest of the input source.
+;---
+	defword	interpret,^~INTERPRET~
+10$:	jsb	parsename
+	movl	(r11),r7		; length
+	bneq	20$
+	addl2	#8,r11			; end of the source
+	rsb
+20$:	movl	4(r11),r6
+	movl	r6,v_errname
+	movl	r7,v_errname+4
+	tstl	v_state			; compiling?
+	beql	30$
+	tstl	v_nlocals		; any locals?
+	beql	30$
+	jsb	s_findlocal		; is it one?
+	tstl	r0
+	beql	30$
+	addl2	#8,r11
+	jsb	s_complocal
+	brb	10$
+30$:	jsb	s_find
+	beql	60$			; not a word
+	addl2	#8,r11
+	jsb	s_ntxt
+	tstl	v_state
+	beql	50$
+	bitb	#f_imm,-1(r1)		; compiling: immediate?
+	bneq	55$			; yes, execute it
+	movl	r1,r0
+	jsb	s_compile_r0
+	brb	10$
+50$:	bitb	#f_conly,-1(r1)
+	beql	55$
+	throw	t_conly
+55$:	jsb	(r1)			; execute it
+	cmpl	r11,#vs_dstop		; underflowed?
+	bgtru	.+4
+	brw	10$
+	throw	t_dsunder
+60$:	jsb	s_number		; a number?
+	movl	(r11)+,r0
+	beql	70$			; no
+	tstl	v_state
+	bneq	.+4
+	brw	10$
+	cmpl	r0,#1			; compile it as a literal
+	bneq	65$
+	movl	(r11)+,r0
+	jsb	s_lit_r0
+	brw	10$
+65$:	cmpl	r0,#2
+	bneq	67$
+	movl	4(r11),r0		; double: low cell first
+	jsb	s_lit_r0
+	movl	(r11),r0
+	jsb	s_lit_r0
+	addl2	#8,r11
+	brw	10$
+67$:	jsb	s_flitcomp		; floating point
+	brw	10$
+70$:	movl	v_errname,-(r11)	; a floating point number?
+	movl	v_errname+4,-(r11)
+	jsb	s_fnumber
+	movl	(r11)+,r0
+	beql	80$
+	movl	#3,r0
+	tstl	v_state
+	bneq	67$
+	brw	10$
+80$:	throw	t_undef
+
+;+++
+;c> EVALUATE -- ( i*x c-addr u -- j*x )
+;---
+	defword	evaluate,^~EVALUATE~
+	pushl	v_blk
+	pushl	v_toin
+	pushl	v_srclen
+	pushl	v_srcaddr
+	pushl	v_srcid
+	movl	(r11)+,v_srclen
+	movl	(r11)+,v_srcaddr
+	mnegl	#1,v_srcid
+	clrl	v_toin
+	clrl	v_blk
+	jsb	interpret
+	movl	(sp)+,v_srcid
+	movl	(sp)+,v_srcaddr
+	movl	(sp)+,v_srclen
+	movl	(sp)+,v_toin
+	movl	(sp)+,v_blk
+	rsb
+
+	newpage	<Exceptions>
+;+++
+;e> CATCH -- ( i*x xt -- j*x 0 | i*x n )
+;	The exception frame on the return stack, at v_handler:
+;	0 previous v_handler, 4 r11, 8 r10, 12 r9, 16 SOURCE-ID,
+;	20 source address, 24 source length, 28 >IN, 32 BLK,
+;	36 CATCH's return address.
+;---
+	defword	catch,^~CATCH~
+	movl	(r11)+,r0		; xt
+	pushl	v_blk
+	pushl	v_toin
+	pushl	v_srclen
+	pushl	v_srcaddr
+	pushl	v_srcid
+	pushl	r9
+	pushl	r10
+	pushl	r11
+	pushl	v_handler
+	movl	sp,v_handler
+	jsb	(r0)			; execute it
+	movl	(sp)+,v_handler		; it returned normally
+	addl2	#32,sp
+	clrl	-(r11)
+	rsb
+
+;+++
+;e> THROW -- ( k*x n -- k*x | i*x n )
+;---
+	defword	w_throw,^~THROW~
+	movl	(r11)+,r0
+	bneq	r_throw_r0
+	rsb
+
+;+++
+;r> r_throw_r0 -- throw the code in r0 to the innermost CATCH.
+;---
+r_throw_r0:
+	movl	v_handler,r1
+	bneq	10$
+	brw	r_uncaught		; no CATCH: back to QUIT
+10$:	movl	r1,sp
+	movl	(sp)+,v_handler
+	movl	(sp)+,r11
+	movl	(sp)+,r10
+	movl	(sp)+,r9
+	movl	(sp)+,v_srcid
+	movl	(sp)+,v_srcaddr
+	movl	(sp)+,v_srclen
+	movl	(sp)+,v_toin
+	movl	(sp)+,v_blk
+	movl	r0,-(r11)
+	rsb
+
+;+++
+;r> r_sigthrow -- where the condition handler sends execution after an
+;	exception: throw the code it chose.
+;---
+r_sigthrow:
+	movl	v_sigthrow,r0
+	brw	r_throw_r0
+
+;+++
+;c> ABORT -- ( i*x -- ) ( R: j*x -- )
+;---
+	defword	abort,^~ABORT~
+	throw	t_abort
+
+;+++
+;s> do_aborts -- run time of ABORT": ( x -- ) followed by the counted
+;	message.
+;---
+do_aborts:
+	movl	(sp)+,r0		; the message
+	movzbl	(r0)+,r1
+	tstl	(r11)+
+	bneq	10$
+	addl2	r1,r0			; no abort: skip the message
+	jmp	(r0)
+10$:	movl	r0,v_abortmsg
+	movl	r1,v_abortmsg+4
+	throw	t_aborts
+
+	newpage	<QUIT>
+;+++
+;c> QUIT -- ( -- ) ( R: i*x -- ) empty the return stack, make the user
+;	input device the input source, and interpret.
+;---
+	defword	quit,^~QUIT~
+r_quit:	movl	#vs_rstop,sp
+	clrl	v_handler
+	clrl	v_state
+	clrl	v_srcid
+	clrl	v_blk
+	moval	v_tib,v_srcaddr
+	clrl	v_srclen
+	clrl	v_toin
+10$:	jsb	refill
+	tstl	(r11)+
+	bneq	20$
+	brw	bye			; end of input
+20$:	movl	#interpret,-(r11)
+	jsb	catch
+	movl	(r11)+,r0
+	bneq	r_error
+	tstl	v_interm		; prompt only at a terminal
+	beql	10$
+	tstl	v_state
+	bneq	30$
+	moval	v_ok,r6
+	movl	#3,r7
+	jsb	s_typer6
+30$:	jsb	s_endline
+	brb	10$
+
+v_ok:	.ascii	/ ok/
+
+;+++
+;r> r_uncaught -- an exception with no CATCH.
+;r> r_error -- report the error r0 and go back to QUIT.
+;---
+r_uncaught:
+	movl	#vs_rstop,sp
+r_error:
+	movl	#vs_rstop,sp
+	cmpl	r0,#t_quit		; QUIT keeps the data stack
+	beql	10$
+	movl	r0,-(sp)
+	jsb	s_report
+	movl	(sp)+,r0
+	movl	#vs_dstop,r11		; empty the stacks
+	movl	#vs_fstop,r9
+10$:	movl	#10,v_base		; back to decimal
+	tstl	v_state			; in the middle of a definition?
+	beql	20$
+	tstl	v_defstart
+	beql	20$
+	jsb	s_undodef		; yes, throw it away
+20$:	clrl	v_state
+	clrl	v_nlocals
+	clrl	v_inlocals
+	clrl	v_errwhere
+	brw	r_quit
+
+;+++
+;s> s_undodef -- forget the definition that was being compiled.
+;---
+s_undodef:
+	movl	v_deflatest,r0
+	movl	r0,v_latest
+	movl	v_current,r1
+	cmpl	(r1),v_reveal		; is it the latest in the word list?
+	bneq	10$
+	movl	@v_reveal,(r1)		; yes, unlink it
+10$:	movl	v_defstart,v_dp
+	clrl	v_defstart
+	clrl	v_reveal
+	rsb
+
+	newpage	<Error Messages>
+;+++
+;s> s_report -- write the message for the THROW code r0.
+;---
+s_report:
+	cmpl	r0,#t_abort		; ABORT says nothing
+	bneq	5$
+	rsb
+5$:	movl	r0,r8
+	jsb	s_flushall
+	tstl	v_olen			; start a new line if need be
+	beql	6$
+	jsb	s_endline
+6$:	tstl	v_errwhere		; where it happened
+	beql	10$
+	movzbl	v_errfile,r7
+	moval	v_errfile+1,r6
+	jsb	s_typer6
+	moval	v_msgline,r6
+	movl	#7,r7
+	jsb	s_typer6
+	movl	v_errline,r0
+	jsb	s_emitdec
+	movl	#^a/:/,r0
+	jsb	s_emit
+	movl	#c_bl,r0
+	jsb	s_emit
+10$:	cmpl	r8,#t_aborts		; ABORT" message
+	bneq	20$
+	movl	v_abortmsg,r6
+	movl	v_abortmsg+4,r7
+	jsb	s_typer6
+	brw	90$
+20$:	movl	v_errname+4,r7		; the name being interpreted
+	beql	25$
+	movl	v_errname,r6
+	jsb	s_typer6
+	moval	v_msgcolon,r6
+	movl	#2,r7
+	jsb	s_typer6
+25$:	tstl	r8			; a VMS condition?
+	bgtr	50$
+	moval	v_errmsgs,r6		; look the code up
+30$:	movl	(r6)+,r0
+	beql	40$
+	movzbl	(r6)+,r7
+	cmpl	r0,r8
+	beql	35$
+	addl2	r7,r6
+	brb	30$
+35$:	jsb	s_typer6
+	brb	90$
+40$:	moval	v_msgerror,r6		; unknown code
+	movl	#6,r7
+	jsb	s_typer6
+	movl	r8,-(r11)
+	jsb	dot
+	brb	90$
+50$:	movw	#256,v_tmpdsc		; VMS message text
+	moval	v_msgbuf,v_tmpdsc+4
+	$getmsg_s msgid=r8,msglen=v_tmplen,bufadr=v_tmpdsc,flags=#15
+	moval	v_msgbuf,r6
+	movzwl	v_tmplen,r7
+	jsb	s_typer6
+90$:	jsb	s_endline
+	tstl	v_errwhere		; show the line in error
+	beql	99$
+	movzbl	v_errsrc,r7
+	beql	99$
+	moval	v_errsrc+1,r6
+	jsb	s_typer6
+	jsb	s_endline
+99$:	rsb
+
+v_msgline:	.ascii	/, line /
+v_msgcolon:	.ascii	/: /
+v_msgerror:	.ascii	/error /
+
+;+++
+;s> s_errwhere -- record where an error happened in a file, unless it
+;	was already recorded by an inner INCLUDE: called with the file's
+;	name at r6, r7 and the line number in r8.
+;---
+s_errwhere:
+	tstl	v_errwhere
+	bneq	10$
+	movl	#1,v_errwhere
+	movl	r8,v_errline
+	cmpl	r7,#255
+	blequ	5$
+	movl	#255,r7
+5$:	movb	r7,v_errfile
+	movc3	r7,(r6),v_errfile+1
+	movl	v_srclen,r7		; and the line itself
+	cmpl	r7,#255
+	blequ	7$
+	movl	#255,r7
+7$:	movb	r7,v_errsrc
+	movc3	r7,@v_srcaddr,v_errsrc+1
+10$:	rsb
+
+;
+; Standard THROW code messages: code, counted text.
+;
+	.macro	errmsg	code,text
+	.long	code
+	cstring	^~text~
+	.endm	errmsg
+v_errmsgs:
+	errmsg	-2,<aborted>
+	errmsg	-3,<stack overflow>
+	errmsg	-4,<stack underflow>
+	errmsg	-5,<return stack overflow>
+	errmsg	-6,<return stack underflow>
+	errmsg	-7,<do-loops nested too deeply during execution>
+	errmsg	-8,<dictionary overflow>
+	errmsg	-9,<invalid memory address>
+	errmsg	-10,<division by zero>
+	errmsg	-11,<result out of range>
+	errmsg	-12,<argument type mismatch>
+	errmsg	-13,<undefined word>
+	errmsg	-14,<interpreting a compile-only word>
+	errmsg	-15,<invalid FORGET>
+	errmsg	-16,<attempt to use zero-length string as a name>
+	errmsg	-17,<pictured numeric output string overflow>
+	errmsg	-18,<parsed string overflow>
+	errmsg	-19,<definition name too long>
+	errmsg	-20,<write to a read-only location>
+	errmsg	-21,<unsupported operation>
+	errmsg	-22,<control structure mismatch>
+	errmsg	-23,<address alignment exception>
+	errmsg	-24,<invalid numeric argument>
+	errmsg	-25,<return stack imbalance>
+	errmsg	-26,<loop parameters unavailable>
+	errmsg	-27,<invalid recursion>
+	errmsg	-28,<user interrupt>
+	errmsg	-29,<compiler nesting>
+	errmsg	-30,<obsolescent feature>
+	errmsg	-31,^~>BODY used on non-CREATEd definition~
+	errmsg	-32,<invalid name argument>
+	errmsg	-33,<block read exception>
+	errmsg	-34,<block write exception>
+	errmsg	-35,<invalid block number>
+	errmsg	-36,<invalid file position>
+	errmsg	-37,^~file I/O exception~
+	errmsg	-38,<non-existent file>
+	errmsg	-39,<unexpected end of file>
+	errmsg	-40,<invalid BASE for floating point conversion>
+	errmsg	-41,<loss of precision>
+	errmsg	-42,<floating-point divide by zero>
+	errmsg	-43,<floating-point result out of range>
+	errmsg	-44,<floating-point stack overflow>
+	errmsg	-45,<floating-point stack underflow>
+	errmsg	-46,<floating-point invalid argument>
+	errmsg	-47,<compilation word list deleted>
+	errmsg	-48,<invalid POSTPONE>
+	errmsg	-49,<search-order overflow>
+	errmsg	-50,<search-order underflow>
+	errmsg	-51,<compilation word list changed>
+	errmsg	-52,<control-flow stack overflow>
+	errmsg	-53,<exception stack overflow>
+	errmsg	-54,<floating-point underflow>
+	errmsg	-55,<floating-point unidentified fault>
+	errmsg	-56,<QUIT>
+	errmsg	-57,<exception in sending or receiving a character>
+	errmsg	-58,^~[IF], [ELSE], or [THEN] exception~
+	errmsg	-59,<ALLOCATE>
+	errmsg	-60,<FREE>
+	errmsg	-61,<RESIZE>
+	errmsg	-62,<CLOSE-FILE>
+	errmsg	-63,<CREATE-FILE>
+	errmsg	-64,<DELETE-FILE>
+	errmsg	-65,<FILE-POSITION>
+	errmsg	-66,<FILE-SIZE>
+	errmsg	-67,<FILE-STATUS>
+	errmsg	-68,<FLUSH-FILE>
+	errmsg	-69,<OPEN-FILE>
+	errmsg	-70,<READ-FILE>
+	errmsg	-71,<READ-LINE>
+	errmsg	-72,<RENAME-FILE>
+	errmsg	-73,<REPOSITION-FILE>
+	errmsg	-74,<RESIZE-FILE>
+	errmsg	-75,<WRITE-FILE>
+	errmsg	-76,<WRITE-LINE>
+	errmsg	-77,<Malformed xchar>
+	errmsg	-78,<SUBSTITUTE>
+	errmsg	-79,<REPLACES>
+	.long	0

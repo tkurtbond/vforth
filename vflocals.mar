@@ -1,0 +1,231 @@
+	newpage	<Locals>
+;******************************************************************************
+;
+; VFLOCALS.MAR -- the Locals word set.
+;
+; A definition with locals starts with
+;	PUSHL R10 / MOVL SP,R10 / SUBL2 #4*n,SP
+; then pops the initialized locals off the data stack, the first local
+; declared through (LOCAL) taking the top item.  Local k (0 based) is at
+; -4*(k+1)(R10).  EXIT and ; compile MOVL R10,SP / MOVL (SP)+,R10 before the
+; RSB.  Locals are pushed before any loop parameters or >R items, so the
+; frame is undisturbed by them.
+;
+; The names live in v_locnames as counted strings in the order of their
+; slots, and the text interpreter looks there first while compiling.
+;
+;******************************************************************************
+	.psect	vf_data
+v_npend:	.long	0		; locals declared so far
+v_ninit:	.long	0		; how many of them are initialized
+v_tmplocs:	.blkl	c_maxlocals	; {: arg names: addresses
+v_tmplens:	.blkl	c_maxlocals	;   and lengths
+v_ntmplocs:	.long	0
+v_tmpvals:	.blkl	c_maxlocals	; {: val names
+v_tmpvlens:	.blkl	c_maxlocals
+v_ntmpvals:	.long	0
+v_bcmode:	.long	0		; {: part being parsed
+
+	.psect	vf_code
+;+++
+;s> s_addlocal -- declare the local named r6, r7.  Uses r0-r5, r8.
+;---
+s_addlocal:
+	cmpl	v_npend,#c_maxlocals
+	blss	10$
+	throw	t_unsup			; too many locals
+10$:	cmpl	r7,#31
+	blequ	20$
+	movl	#31,r7
+20$:	movl	v_localsz,r8
+	movab	v_locnames[r8],r8
+	movb	r7,(r8)+
+	movc3	r7,(r6),(r8)
+	addl2	r7,v_localsz
+	incl	v_localsz
+	incl	v_npend
+	rsb
+
+;+++
+;s> s_endlocals -- compile the code that makes the locals frame.
+;---
+s_endlocals:
+	movl	v_npend,r6
+	bneq	5$
+	rsb
+5$:	movzwl	#op_pushl!<adm_r10@8>,r0	; PUSHL R10
+	jsb	s_cw
+	movl	#op_movl!<adm_sp@8>!<adm_r10@16>,r0 ; MOVL SP,R10
+	jsb	s_cl
+	decl	v_dp
+	movzwl	#^xc2!<adm_imm@8>,r0	; SUBL2 #4*n,SP
+	jsb	s_cw
+	ashl	#2,r6,r0
+	jsb	s_cl
+	movl	#adm_sp,r0
+	jsb	s_cb
+	clrl	r7			; MOVL (R11)+,-4*(k+1)(R10)
+10$:	cmpl	r7,v_ninit
+	bgeq	20$
+	movl	#op_movl!<adm_ainc_r11@8>!<adm_bdisp_r10@16>,r0
+	jsb	s_cl
+	decl	v_dp
+	mnegl	r7,r0
+	ashl	#2,r0,r0
+	subl2	#4,r0
+	jsb	s_cb
+	incl	r7
+	brb	10$
+20$:	movl	r6,v_nlocals
+	rsb
+
+;+++
+;s> s_findlocal -- find the local named r6, r7: r0 = its slot + 1, or 0.
+;	Preserves r6, r7.
+;---
+s_findlocal:
+	pushr	#^m<r1,r2,r3,r4,r5,r8>
+	moval	v_locnames,r2
+	clrl	r8
+10$:	cmpl	r8,v_nlocals
+	bgeq	30$
+	pushr	#^m<r2>
+	jsb	s_namecmp
+	popr	#^m<r2>			; (keeps the condition codes)
+	beql	20$
+	movzbl	(r2),r0			; next name
+	addl2	r0,r2
+	incl	r2
+	incl	r8
+	brb	10$
+20$:	addl3	#1,r8,r0
+	brb	40$
+30$:	clrl	r0
+40$:	popr	#^m<r1,r2,r3,r4,r5,r8>
+	rsb
+
+;+++
+;s> s_complocal -- compile MOVL -4*r0(R10),-(R11), fetching local r0-1.
+;	s_complocalto -- compile MOVL (R11)+,-4*r0(R10).
+;---
+s_complocal:
+	mnegl	r0,r2
+	ashl	#2,r2,r2
+	movzwl	#op_movl!<adm_bdisp_r10@8>,r0
+	jsb	s_cw
+	movl	r2,r0
+	jsb	s_cb
+	movl	#adm_adec_r11,r0
+	brw	s_cb
+
+s_complocalto:
+	mnegl	r0,r2
+	ashl	#2,r2,r2
+	movl	#op_movl!<adm_ainc_r11@8>!<adm_bdisp_r10@16>,r0
+	jsb	s_cl
+	decl	v_dp
+	movl	r2,r0
+	brw	s_cb
+
+;+++
+;l> (LOCAL) -- ( c-addr u -- ) declare a local, or with u = 0 end them.
+;---
+	defword	parenlocal,^~(LOCAL)~,f_conly
+	movl	(r11)+,r7
+	movl	(r11)+,r6
+	tstl	r7
+	beql	10$
+	jsb	s_addlocal
+	incl	v_ninit
+	rsb
+10$:	brw	s_endlocals
+
+;+++
+;l> LOCALS| -- ( "name1 ... namen |" -- ) name1 takes the top item.
+;---
+	defword	localsbar,^~LOCALS|~,f_imm!f_conly
+10$:	jsb	parsename
+	movl	(r11)+,r7
+	movl	(r11)+,r6
+	tstl	r7
+	beql	20$
+	cmpl	r7,#1
+	bneq	15$
+	cmpb	(r6),#^a/|/
+	beql	20$
+15$:	jsb	s_addlocal
+	incl	v_ninit
+	brb	10$
+20$:	brw	s_endlocals
+
+;+++
+;l> {: -- ( "args [| vals] [-- outs] :}" -- ) the last arg takes the top
+;	item; vals are not initialized; outs are ignored.
+;---
+	defword	bracecolon,^~{:~,f_imm!f_conly
+	clrl	v_ntmplocs
+	clrl	v_ntmpvals
+	clrl	v_bcmode		; 0 args, 1 vals, 2 outs
+10$:	jsb	parsename
+	movl	(r11)+,r7
+	movl	(r11)+,r6
+	tstl	r7
+	bneq	12$
+	jsb	refill			; (shouldn't span lines, but allow it)
+	tstl	(r11)+
+	bneq	10$
+	brw	40$
+12$:	moval	v_sbrace,r2
+	jsb	s_namecmp
+	bneq	15$
+	brw	40$			; :}
+15$:	moval	v_sbar,r2
+	jsb	s_namecmp
+	bneq	20$
+	movl	#1,v_bcmode		; |
+	brb	10$
+20$:	moval	v_sdashes,r2
+	jsb	s_namecmp
+	bneq	25$
+	movl	#2,v_bcmode		; --
+	brb	10$
+25$:	cmpl	v_bcmode,#1
+	bgtr	10$			; an out: ignore it
+	beql	30$			; a val
+	movl	v_ntmplocs,r0		; an arg
+	cmpl	r0,#c_maxlocals
+	bgeq	10$
+	movl	r6,v_tmplocs[r0]
+	movl	r7,v_tmplens[r0]
+	incl	v_ntmplocs
+	brw	10$
+30$:	movl	v_ntmpvals,r0
+	cmpl	r0,#c_maxlocals
+	bgeq	35$
+	movl	r6,v_tmpvals[r0]
+	movl	r7,v_tmpvlens[r0]
+	incl	v_ntmpvals
+35$:	brw	10$
+40$:				; the args, last first
+45$:	decl	v_ntmplocs
+	blss	50$
+	movl	v_ntmplocs,r0
+	movl	v_tmplocs[r0],r6
+	movl	v_tmplens[r0],r7
+	jsb	s_addlocal
+	incl	v_ninit
+	brb	45$
+50$:	clrl	v_bcmode		; then the vals, first first
+55$:	movl	v_bcmode,r0
+	cmpl	r0,v_ntmpvals
+	bgeq	60$
+	movl	v_tmpvals[r0],r6
+	movl	v_tmpvlens[r0],r7
+	jsb	s_addlocal
+	incl	v_bcmode
+	brb	55$
+60$:	brw	s_endlocals
+
+v_sbrace:	cstring	<:}>
+v_sbar:		cstring	<|>
+v_sdashes:	cstring	<-->

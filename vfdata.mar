@@ -1,0 +1,167 @@
+	newpage	<Data Section>
+;******************************************************************************
+;
+; VFDATA.MAR -- Data Section: the system variables, buffers and stacks.
+;
+;******************************************************************************
+	.psect	vf_data,long,wrt,noexe
+
+;
+; The dictionary and the search order
+;
+v_dp:		.long	vf_dict_start	; HERE, the data-space pointer
+v_state:	.long	0		; STATE: true while compiling
+v_base:		.long	10		; BASE
+v_latest:	.long	0		; nt of the most recent definition
+v_latestxt:	.long	0		; xt of the most recent definition
+v_current:	.long	wid_forth	; the compilation word list
+v_norder:	.long	1		; number of word lists in the order
+v_order:	.long	wid_forth	; the search order, first searched first
+		.blkl	c_maxorder-1
+v_wlchain:	.long	wid_editor	; most recently made word list
+v_csp:		.long	0		; data stack depth at `:', for checking
+v_leave:	.long	0		; chain of LEAVEs in the current DO loop
+v_nlocals:	.long	0		; number of locals in this definition
+v_localsz:	.long	0		; next free byte in v_locnames
+v_locnames:	.blkb	c_maxlocals*32	; names of the locals: count, name
+v_inlocals:	.long	0		; true between {: and :}
+v_defstart:	.long	0		; HERE before the current definition
+v_reveal:	.long	0		; nt that ; reveals, 0 for :NONAME
+v_deflatest:	.long	0		; v_latest before the current definition
+
+;
+; Word lists.  A word list id (wid) is the address of:
+;	long	-- nt of the latest word in it (0 if empty)
+;	long	-- the wid of the word list made before it (0 ends)
+;	long	-- the nt of a word that names it, or 0
+;
+wid_env:	.long	vl_env_last	; ENVIRONMENT? queries
+		.long	0
+		.long	0
+wid_forth:	.long	vl_forth_last	; FORTH-WORDLIST
+		.long	wid_env
+		.long	0		; filled in with FORTH's nt
+
+;
+; The input source
+;
+v_srcid:	.long	0		; SOURCE-ID: 0 user input device,
+					; -1 string, else a fileid
+v_srcaddr:	.long	v_tib		; SOURCE's address
+v_srclen:	.long	0		; SOURCE's length
+v_toin:		.long	0		; >IN
+v_blk:		.long	0		; BLK
+v_scr:		.long	0		; SCR
+v_tib:		.blkb	c_tibsize	; terminal input buffer
+v_eof:		.long	0		; true after end of user input
+
+;
+; Transient regions
+;
+v_hld:		.long	0		; pictured numeric output pointer
+v_holdbuf:	.blkb	c_holdsize	; pictured numeric output buffer
+v_holdend:
+v_wordbuf:	.blkb	c_wordsize	; WORD's buffer
+v_pad:		.blkb	c_padsize	; PAD (only programs use it)
+v_xbuf:		.blkb	c_tibsize	; S\" translates into this
+v_msgbuf:	.blkb	256		; VMS message text for errors
+v_sbufs:	.blkb	c_sbufsize*c_nsbufs ; buffers for interpreted S" S\"
+v_sbufnext:	.long	0		; next S" buffer to use, 0 to n-1
+
+;
+; Exceptions and errors
+;
+v_handler:	.long	0		; return stack address of the
+					; innermost CATCH frame, 0 if none
+v_sigthrow:	.long	0		; THROW code of a VMS exception
+v_abortmsg:	.long	0,0		; ABORT"'s message: address, length
+v_errname:	.long	0,0		; the name last parsed: address, length
+v_errwhere:	.long	0		; true once v_errfile is set
+v_errfile:	.blkb	256		; counted file name where an error
+v_errline:	.long	0		;   happened, and its line
+v_errsrc:	.blkb	256		; counted text of the line in error
+v_errin:	.long	0		; >IN in that line
+v_mainfp:	.long	0		; FP of the main procedure's frame
+
+;
+; Terminal input and output
+;
+v_interm:	.long	0		; true if SYS$INPUT is a terminal
+v_outterm:	.long	0		; true if SYS$OUTPUT is a terminal
+v_ttchan:	.word	0		; channel to the input terminal
+v_outchan:	.word	0		; channel to the output terminal
+v_kbid:		.long	0		; SMG virtual keyboard id, 0 if none
+v_reading:	.long	0		; true while waiting for terminal input
+v_ctrlc:	.long	0		; true when Ctrl/C cancelled a read
+v_intpend:	.long	0		; true when Ctrl/C interrupted a library
+					; routine or system service
+v_olen:		.long	0		; bytes in v_obuf
+v_obuf:		.blkb	c_outsize	; output buffer
+v_iosb:		.quad	0		; I/O status block
+v_keybuf:	.blkb	16		; KEY's input
+v_ekbuf:	.blkb	16		; EKEY's pushed back characters
+v_eknum:	.long	0		;   how many of them
+v_eklen:	.long	0		;   and the next one to return
+v_keyline:	.blkb	c_tibsize	; KEY's line when input isn't a terminal
+v_keylen:	.long	0		;   its length
+v_keypos:	.long	-1		;   and the next character (-1 none)
+v_inname:	.ascid	/SYS$INPUT/
+v_outname:	.ascid	/SYS$OUTPUT/
+v_devclass:	.long	0		; $GETDVI result
+v_dviitems:	.word	4,dvi$_devclass	; $GETDVI item list for DEVCLASS
+		.long	v_devclass,0
+		.long	0
+v_tmpdsc:	descriptor		; scratch string descriptors
+v_tmpdsc2:	descriptor
+v_tmplen:	.word	0
+		.word	0
+v_cmdline:	.blkb	256		; the foreign command line
+v_cmdlen:	.word	0
+		.word	0
+
+	newpage	<Stacks>
+;******************************************************************************
+;
+; Stacks -- each between guard pages that VFORTH sets to no access at
+; startup, so overflow and underflow become THROW codes instead of
+; wandering through memory.
+;
+;******************************************************************************
+	.psect	vf_stacks,page,wrt,noexe
+vs_dsglo:	.blkb	c_guard		; data stack overflow guard
+vs_dsbot:	.blkb	c_ds_cells*c_cell
+vs_dstop:				; empty data stack: r11 = vs_dstop
+vs_dsghi:	.blkb	c_guard		; data stack underflow guard
+vs_rsglo:	.blkb	c_rsguard	; return stack overflow guard
+vs_rsbot:	.blkb	c_rs_bytes
+vs_rstop:				; empty return stack: sp = vs_rstop
+vs_rsghi:	.blkb	c_guard		; return stack underflow guard
+vs_fsglo:	.blkb	c_guard		; floating stack overflow guard
+vs_fsbot:	.blkb	c_fs_items*8
+vs_fstop:				; empty floating stack: r9 = vs_fstop
+vs_fsghi:	.blkb	c_guard		; floating stack underflow guard
+vs_end:
+
+	.psect	vf_data
+v_guards:				; guard ranges, and their THROW codes
+		.long	vs_dsglo,vs_dsbot-1,t_dsover
+		.long	vs_dsghi,vs_rsglo-1,t_dsunder
+		.long	vs_rsglo,vs_rsbot-1,t_rsover
+		.long	vs_rsghi,vs_fsglo-1,t_rsunder
+		.long	vs_fsglo,vs_fsbot-1,t_fsover
+		.long	vs_fsghi,vs_end-1,t_fsunder
+		.long	0
+
+	newpage	<Dictionary Space>
+;******************************************************************************
+;
+; Dictionary space for the definitions made while VFORTH runs.  The built-in
+; words are in the vf_code psect.
+;
+;******************************************************************************
+	.psect	vf_dict,page,wrt,exe
+vf_dict_start:
+	.blkb	c_dictsize
+vf_dict_end:
+
+	.psect	vf_code,long,wrt,exe

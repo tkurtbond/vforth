@@ -1,0 +1,366 @@
+	newpage	<Numbers>
+;******************************************************************************
+;
+; VFNUM.MAR -- number conversion: pictured numeric output, the number
+; output words, >NUMBER and the interpreter's number recognizer.
+;
+;******************************************************************************
+	.psect	vf_code
+
+;+++
+;c> BASE -- ( -- a-addr )
+;---
+	defword	base,^~BASE~,inl=1
+	movl	#v_base,-(r11)
+base_e:	rsb
+
+;+++
+;c> DECIMAL -- ( -- )  HEX -- ( -- )
+;---
+	defword	decimal,^~DECIMAL~
+	movl	#10,v_base
+	rsb
+
+	defword	hex,^~HEX~
+	movl	#16,v_base
+	rsb
+
+	newpage	<Pictured Numeric Output>
+;+++
+;c> <# -- ( -- ) start pictured numeric output.
+;---
+	defword	lesssharp,^~<#~
+	moval	v_holdend,v_hld
+	rsb
+
+;+++
+;c> HOLD -- ( char -- )
+;---
+	defword	hold,^~HOLD~
+	movl	(r11)+,r0
+s_hold:	cmpl	v_hld,#v_holdbuf	; room for another?
+	blequ	10$			; no
+	decl	v_hld
+	movb	r0,@v_hld
+	rsb
+10$:	throw	t_holdover
+
+;+++
+;c> HOLDS -- ( c-addr u -- )
+;---
+	defword	holds,^~HOLDS~
+	movl	(r11)+,r7
+	movl	(r11)+,r6
+	addl2	r7,r6			; from the end
+	tstl	r7
+	bleq	20$
+10$:	movzbl	-(r6),r0
+	jsb	s_hold
+	sobgtr	r7,10$
+20$:	rsb
+
+;+++
+;c> SIGN -- ( n -- )
+;---
+	defword	sign,^~SIGN~
+	tstl	(r11)+
+	bgeq	10$
+	movl	#^a/-/,r0
+	brb	s_hold
+10$:	rsb
+
+;+++
+;s> s_digit -- convert the digit r0 to a character.
+;---
+s_digit:
+	cmpl	r0,#9
+	bgtr	10$
+	addl2	#^a/0/,r0
+	rsb
+10$:	addl2	#^a/A/-10,r0
+	rsb
+
+;+++
+;c> # -- ( ud1 -- ud2 ) divide ud1 by BASE, HOLD the remainder's digit.
+;---
+	defword	sharp,^~#~
+	movl	v_base,r4
+	movl	(r11),r2		; high cell / base
+	clrl	r3
+	jsb	s_umdiv
+	movl	r2,(r11)		; new high cell
+	movl	4(r11),r2		; (remainder, low cell) / base
+	jsb	s_umdiv
+	movl	r2,4(r11)		; new low cell
+	movl	r3,r0			; the digit
+	jsb	s_digit
+	brw	s_hold
+
+;+++
+;c> #S -- ( ud1 -- 0 0 )
+;---
+	defword	sharps,^~#S~
+10$:	jsb	sharp
+	tstl	(r11)
+	bneq	10$
+	tstl	4(r11)
+	bneq	10$
+	rsb
+
+;+++
+;c> #> -- ( xd -- c-addr u )
+;---
+	defword	sharpgreater,^~#>~
+	movl	v_hld,4(r11)
+	moval	v_holdend,r0
+	subl3	v_hld,r0,(r11)
+	rsb
+
+	newpage	<Number Output>
+;+++
+;s> s_dstr -- convert the double on the stack to a signed numeric string.
+;	( d -- c-addr u )
+;---
+s_dstr:	movl	(r11),-(sp)		; the sign, in the high cell
+	jsb	dabs
+	jsb	lesssharp
+	jsb	sharps
+	movl	(sp)+,-(r11)
+	jsb	sign
+	brw	sharpgreater
+
+;+++
+;s> s_ustr -- ( u -- c-addr u ) convert u to an unsigned numeric string.
+;---
+s_ustr:	clrl	-(r11)
+	jsb	lesssharp
+	jsb	sharps
+	brw	sharpgreater
+
+;+++
+;c> . -- ( n -- )
+;---
+	defword	dot,^~.~
+	jsb	stod
+	jsb	s_dstr
+	jsb	type
+	brw	space
+
+;+++
+;c> U. -- ( u -- )
+;---
+	defword	udot,^~U.~
+	jsb	s_ustr
+	jsb	type
+	brw	space
+
+;+++
+;s> s_rtype -- ( c-addr u n -- ) type the string right justified in n
+;	columns.
+;---
+s_rtype:
+	subl3	4(r11),(r11),(r11)	; spaces needed
+	jsb	spaces
+	brw	type
+
+;+++
+;c> .R -- ( n1 n2 -- )
+;---
+	defword	dotr,^~.R~
+	movl	(r11)+,-(sp)		; width
+	jsb	stod
+	jsb	s_dstr
+	movl	(sp)+,-(r11)
+	brb	s_rtype
+
+;+++
+;c> U.R -- ( u n -- )
+;---
+	defword	udotr,^~U.R~
+	movl	(r11)+,-(sp)
+	jsb	s_ustr
+	movl	(sp)+,-(r11)
+	brb	s_rtype
+
+;+++
+;d> D. -- ( d -- )
+;---
+	defword	ddot,^~D.~
+	jsb	s_dstr
+	jsb	type
+	brw	space
+
+;+++
+;d> D.R -- ( d n -- )
+;---
+	defword	ddotr,^~D.R~
+	movl	(r11)+,-(sp)
+	jsb	s_dstr
+	movl	(sp)+,-(r11)
+	brw	s_rtype
+
+;+++
+;v> UD. -- ( ud -- )
+;---
+	defword	uddot,^~UD.~
+	jsb	lesssharp
+	jsb	sharps
+	jsb	sharpgreater
+	jsb	type
+	brw	space
+
+;+++
+;d> DABS -- ( d -- ud )
+;---
+	defword	dabs,^~DABS~
+	tstl	(r11)
+	bgeq	10$
+	brw	dnegate
+10$:	rsb
+
+;+++
+;d> DNEGATE -- ( d1 -- d2 )
+;---
+	defword	dnegate,^~DNEGATE~,inl=1
+	mcoml	(r11),(r11)
+	mcoml	4(r11),4(r11)
+	incl	4(r11)
+	adwc	#0,(r11)
+dnegate_e: rsb
+
+	newpage	<Number Input>
+;+++
+;s> s_digval -- the value of the digit character r0 in r0, or 99 if it
+;	isn't one.
+;---
+s_digval:
+	subl2	#^a/0/,r0
+	cmpl	r0,#9
+	blequ	30$			; 0-9
+	subl2	#^a/A/-^a/0/,r0
+	cmpl	r0,#25
+	blequ	20$			; A-Z
+	subl2	#^a/a/-^a/A/,r0
+	cmpl	r0,#25
+	blequ	20$			; a-z
+	movl	#99,r0
+	rsb
+20$:	addl2	#10,r0
+30$:	rsb
+
+;+++
+;s> s_tonum -- the loop of >NUMBER.
+;	in:	r2 = low, r3 = high cell of the accumulator, r4 = base,
+;		r6 = address, r7 = length
+;	out:	the same, updated; r8 = number of digits converted
+;	Uses r0, r1, r5.
+;---
+s_tonum:
+	clrl	r8
+10$:	tstl	r7
+	bleq	30$
+	movzbl	(r6),r0
+	jsb	s_digval
+	cmpl	r0,r4
+	bgequ	30$			; not a digit in this base
+	movl	r0,r5
+	emul	r2,r4,r5,r0		; low*base + digit, signed
+	tstl	r2			; correct for an unsigned low cell
+	bgeq	20$
+	addl2	r4,r1
+20$:	mull2	r4,r3			; high*base
+	addl2	r1,r3
+	movl	r0,r2
+	incl	r6
+	decl	r7
+	incl	r8
+	brb	10$
+30$:	rsb
+
+;+++
+;c> >NUMBER -- ( ud1 c-addr1 u1 -- ud2 c-addr2 u2 )
+;---
+	defword	tonumber,^~>NUMBER~
+	movl	(r11),r7
+	movl	4(r11),r6
+	movl	8(r11),r3
+	movl	12(r11),r2
+	movl	v_base,r4
+	jsb	s_tonum
+	movl	r7,(r11)
+	movl	r6,4(r11)
+	movl	r3,8(r11)
+	movl	r2,12(r11)
+	rsb
+
+;+++
+;s> s_number -- ( c-addr u -- n 1 | d 2 | 0 ) convert a number the way
+;	the text interpreter does: an optional prefix # (decimal), $ (hex)
+;	or % (binary), an optional -, digits, and a final . for a double;
+;	or 'c' for a character.
+;---
+s_number:
+	movl	(r11)+,r7		; length
+	movl	(r11)+,r6		; address
+	cmpl	r7,#3			; 'c'?
+	bneq	10$
+	cmpb	(r6),#^a/'/
+	bneq	10$
+	cmpb	2(r6),#^a/'/
+	bneq	10$
+	movzbl	1(r6),-(r11)
+	movl	#1,-(r11)
+	rsb
+10$:	movl	v_base,r4
+	tstl	r7
+	bleq	90$
+	cmpb	(r6),#^a/#/
+	bneq	12$
+	movl	#10,r4
+	brb	15$
+12$:	cmpb	(r6),#^a/$/
+	bneq	13$
+	movl	#16,r4
+	brb	15$
+13$:	cmpb	(r6),#^a/%/
+	bneq	20$
+	movl	#2,r4
+15$:	incl	r6
+	decl	r7
+20$:	clrl	-(sp)			; sign flag
+	tstl	r7
+	bleq	85$
+	cmpb	(r6),#^a/-/
+	bneq	25$
+	movl	#1,(sp)
+	incl	r6
+	decl	r7
+25$:	clrq	r2
+	jsb	s_tonum
+	tstl	r8			; any digits?
+	beql	85$			; no
+	tstl	r7			; all converted?
+	beql	50$			; yes, a single
+	cmpl	r7,#1			; just a final `.'?
+	bneq	85$
+	cmpb	(r6),#^a/./
+	bneq	85$
+	tstl	(sp)+			; a double: negative?
+	beql	30$
+	mcoml	r2,r2			; negate r3:r2
+	mcoml	r3,r3
+	incl	r2
+	adwc	#0,r3
+30$:	movl	r2,-(r11)
+	movl	r3,-(r11)
+	movl	#2,-(r11)
+	rsb
+50$:	tstl	(sp)+
+	beql	55$
+	mnegl	r2,r2
+55$:	movl	r2,-(r11)
+	movl	#1,-(r11)
+	rsb
+85$:	tstl	(sp)+
+90$:	clrl	-(r11)
+	rsb

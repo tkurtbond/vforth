@@ -1,0 +1,11 @@
+#!/bin/sh
+# Copies the VFORTH sources to [.VFORTH] on the VAX and builds VFORTH.EXE
+# and VFORTHDBG.EXE there with MMS, printing the diagnostics.
+#
+#   tools/vf-build
+here=$(cd "$(dirname "$0")" && pwd)
+cd "$here/.." || exit 2
+"$here/vax-put" descrip.mms vf*.mar || exit 2
+expect -f "$here/vax-dcl.exp" \
+  'MMS/IGNORE=WARNING' \
+  'PURGE/KEEP=2 VF*.*' | tr -d '\r' | grep -v -e '^VFDCL>' -e '^ *$'

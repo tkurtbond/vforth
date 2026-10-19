@@ -1,0 +1,536 @@
+	newpage	<Programming Tools>
+;******************************************************************************
+;
+; VFTOOLS.MAR -- the Programming-Tools word set, and the rest of the Core
+; extension words: PAD, UNUSED, SAVE-INPUT, RESTORE-INPUT.
+;
+;******************************************************************************
+	.psect	vf_data
+v_col:		.long	0		; column, for WORDS and SEE
+	.psect	vf_code
+
+;+++
+;c> PAD -- ( -- c-addr )
+;---
+	defword	pad,^~PAD~,inl=1
+	movl	#v_pad,-(r11)
+pad_e:	rsb
+
+;+++
+;c> UNUSED -- ( -- u )
+;---
+	defword	unused,^~UNUSED~
+	subl3	v_dp,#vf_dict_end,-(r11)
+	rsb
+
+;+++
+;c> SAVE-INPUT -- ( -- lpos line blk srcid >in 5 )
+;---
+	defword	saveinput,^~SAVE-INPUT~
+	clrq	r0
+	movl	v_srcid,r2
+	bleq	10$
+	movl	fcb_lpos(r2),r0		; a file: where the line starts
+	movl	fcb_line(r2),r1
+10$:	movl	r0,-(r11)
+	movl	r1,-(r11)
+	movl	v_blk,-(r11)
+	movl	v_srcid,-(r11)
+	movl	v_toin,-(r11)
+	movl	#5,-(r11)
+	rsb
+
+;+++
+;c> RESTORE-INPUT -- ( lpos line blk srcid >in 5 -- flag )
+;---
+	defword	restoreinput,^~RESTORE-INPUT~
+	cmpl	(r11),#5
+	bneq	80$
+	cmpl	8(r11),v_srcid		; the same input source?
+	bneq	80$
+	movl	12(r11),v_blk
+	beql	10$
+	movl	v_blk,-(r11)		; a block
+	jsb	block
+	movl	(r11)+,v_srcaddr
+	movl	#c_blocksize,v_srclen
+	brb	50$
+10$:	movl	v_srcid,r8		; a file?
+	bleq	50$
+	cmpl	20(r11),fcb_lpos(r8)	; another line?
+	beql	50$
+	movl	20(r11),r2
+	jsb	s_seek
+	blbc	r0,80$
+	jsb	s_fillline
+	tstl	r0
+	beql	80$
+	movl	v_srcid,r8
+	movl	16(r11),fcb_line(r8)
+50$:	movl	4(r11),v_toin
+	addl2	#20,r11
+	clrl	(r11)
+	rsb
+80$:	movl	(r11)+,r0		; can't: drop them all
+	moval	(r11)[r0],r11
+	mnegl	#1,-(r11)
+	rsb
+
+	newpage	<Looking at the Stack and Memory>
+;+++
+;t> .S -- ( -- ) show the stack, bottom first, without changing it.
+;---
+	defword	dots,^~.S~
+	movl	#^a/</,r0
+	jsb	s_emit
+	jsb	depth
+	movl	(r11)+,r0
+	jsb	s_emitdec
+	movl	#^a/>/,r0
+	jsb	s_emit
+	jsb	space
+	movl	#vs_dstop,-(sp)
+10$:	subl2	#4,(sp)
+	cmpl	(sp),r11
+	blssu	20$
+	movl	@(sp),-(r11)
+	jsb	dot
+	brb	10$
+20$:	tstl	(sp)+
+	rsb
+
+;+++
+;t> ? -- ( a-addr -- )
+;---
+	defword	question,^~?~
+	movl	@(r11),(r11)
+	brw	dot
+
+;+++
+;s> s_hex -- type r0 in hex, r1 digits.  Uses r0-r5.
+;---
+s_hex:	movl	r0,r4
+	movl	r1,r5
+10$:	decl	r5
+	blss	20$
+	ashl	#2,r5,r1		; bit position of the digit
+	extzv	r1,#4,r4,r0
+	jsb	s_digit
+	jsb	s_emit
+	brb	10$
+20$:	rsb
+
+;+++
+;t> DUMP -- ( addr u -- ) show memory in hex and as characters.
+;---
+	defword	dump,^~DUMP~
+	movl	(r11)+,r7
+	movl	(r11)+,r6
+10$:	tstl	r7
+	bgtr	15$
+	rsb
+15$:	movl	r6,r0			; address
+	movl	#8,r1
+	jsb	s_hex
+	movl	#^a/:/,r0
+	jsb	s_emit
+	clrl	r8
+20$:	jsb	space			; up to 16 bytes in hex
+	cmpl	r8,r7
+	bgeq	25$
+	movzbl	(r6)[r8],r0
+	movl	#2,r1
+	jsb	s_hex
+	brb	27$
+25$:	jsb	space
+	jsb	space
+27$:	aoblss	#16,r8,20$
+	jsb	space
+	jsb	space
+	clrl	r8
+30$:	cmpl	r8,r7			; and as characters
+	bgeq	40$
+	movzbl	(r6)[r8],r0
+	cmpl	r0,#c_bl
+	blss	35$
+	cmpl	r0,#126
+	bleq	37$
+35$:	movl	#^a/./,r0
+37$:	jsb	s_emit
+	aoblss	#16,r8,30$
+40$:	jsb	s_endline
+	addl2	#16,r6
+	subl2	#16,r7
+	brw	10$
+
+	newpage	<Names>
+;+++
+;t> NAME>STRING -- ( nt -- c-addr u )
+;---
+	defword	nametostring,^~NAME>STRING~
+	movl	(r11),r0
+	movzbl	4(r0),r1
+	bicl2	#h_hidden,r1
+	movab	5(r0),(r11)
+	movl	r1,-(r11)
+	rsb
+
+;+++
+;t> NAME>INTERPRET -- ( nt -- xt | 0 )
+;---
+	defword	nametointerpret,^~NAME>INTERPRET~
+	movl	(r11),r0
+	jsb	s_ntxt
+	movl	r1,(r11)
+	rsb
+
+;+++
+;t> NAME>COMPILE -- ( nt -- x xt )
+;---
+	defword	nametocompile,^~NAME>COMPILE~
+	movl	(r11),r0
+	jsb	s_ntxt
+	movl	r1,(r11)
+	bitb	#f_imm,-1(r1)
+	beql	10$
+	movl	#execute,-(r11)
+	rsb
+10$:	movl	#compilecomma,-(r11)
+	rsb
+
+;+++
+;t> TRAVERSE-WORDLIST -- ( i*x xt wid -- j*x ) execute xt ( nt -- flag )
+;	for each word in the word list, latest first, while it returns true.
+;---
+	defword	traversewordlist,^~TRAVERSE-WORDLIST~
+	movl	@(r11)+,-(sp)		; latest nt
+	movl	(r11)+,-(sp)		; xt
+10$:	movl	4(sp),r0
+	beql	30$
+	movl	(r0),4(sp)		; the next one, first
+	bbs	#7,4(r0),10$		; (hidden)
+	movl	r0,-(r11)
+	jsb	@(sp)
+	tstl	(r11)+
+	bneq	10$
+30$:	addl2	#8,sp
+	rsb
+
+;+++
+;s> s_xtname -- r0 = the nt whose xt is r1, or 0.  Uses r0-r4.
+;---
+s_xtname:
+	movl	v_wlchain,r3		; every word list
+10$:	movl	(r3),r0
+20$:	beql	30$
+	movzbl	4(r0),r2
+	bicl2	#h_hidden,r2
+	addl2	r0,r2
+	addl2	#6,r2
+	cmpl	r2,r1
+	beql	40$
+	movl	(r0),r0
+	brb	20$
+30$:	movl	4(r3),r3
+	bneq	10$
+	clrl	r0
+40$:	rsb
+
+;+++
+;s> s_typename -- type the name of the nt r0 and a space.
+;---
+s_typename:
+	movzbl	4(r0),r7
+	bicl2	#h_hidden,r7
+	movab	5(r0),r6
+	addl2	r7,v_col
+	incl	v_col
+	jsb	s_typer6
+	brw	space
+
+;+++
+;t> WORDS -- ( -- ) list the words of the first word list in the search
+;	order.
+;---
+	defword	words,^~WORDS~
+	clrl	v_col
+	movl	@v_order,r8
+10$:	beql	30$
+	movzbl	4(r8),r0
+	bbs	#7,r0,20$		; (hidden)
+	addl2	v_col,r0
+	cmpl	r0,#78			; room on the line?
+	blss	15$
+	jsb	s_endline
+	clrl	v_col
+15$:	movl	r8,r0
+	jsb	s_typename
+20$:	movl	(r8),r8
+	brb	10$
+30$:	brw	s_endline
+
+;+++
+;t> FORGET -- ( "name" -- ) forget name and the words defined after it.
+;---
+	defword	forget,^~FORGET~
+	jsb	s_findname
+	cmpl	r0,#vf_dict_start	; a built-in word?
+	bgequ	10$
+	throw	t_badforget
+10$:	movl	r0,v_dp
+	movl	v_wlchain,r3
+20$:	cmpl	r3,r0			; word lists made later go
+	blssu	30$
+	movl	4(r3),r3
+	bneq	20$
+30$:	movl	r3,v_wlchain
+40$:	movl	(r3),r1			; each list's words made later go
+50$:	beql	60$
+	cmpl	r1,r0
+	blssu	60$
+	movl	(r1),r1
+	brb	50$
+60$:	movl	r1,(r3)
+	movl	4(r3),r3
+	bneq	40$
+	movl	@v_current,v_latest
+	rsb
+
+	newpage	<SEE>
+;******************************************************************************
+;
+; SEE decompiles a colon definition: calls are shown by name, literals as
+; numbers, strings as strings, branches as -> and an address, and any
+; inline code that is the code of a word by that word's name.  Anything
+; else is shown as hex bytes.  It goes on to the next header or HERE.
+;
+;******************************************************************************
+;+++
+;s> s_seecol -- start a new line if the column is past 64.
+;---
+s_seecol:
+	cmpl	v_col,#64
+	blss	10$
+	jsb	s_endline
+	clrl	v_col
+10$:	rsb
+
+;+++
+;s> s_seeword -- r6 = an xt: r7 = the end of its code (the nearest header
+;	after it, or HERE).
+;---
+s_seeword:
+	movl	v_dp,r7
+	movl	v_wlchain,r3
+10$:	movl	(r3),r0
+20$:	beql	30$
+	cmpl	r0,r6
+	blequ	25$
+	cmpl	r0,r7
+	bgequ	25$
+	movl	r0,r7
+25$:	movl	(r0),r0
+	brb	20$
+30$:	movl	4(r3),r3
+	bneq	10$
+	cmpl	r6,#vf_dict_start	; a built-in word ends before vf_code's
+	bgequ	40$			; next word, at most
+	cmpl	r7,#vf_dict_start
+	blssu	40$
+	addl3	#256,r6,r7
+40$:	rsb
+
+;+++
+;s> s_seeinline -- is the code at r6 some inline word's code?  r0 = its
+;	nt, r1 = the length, or r0 = 0.
+;---
+s_seeinline:
+	movl	v_wlchain,r8
+10$:	movl	(r8),r5
+20$:	beql	50$
+	movzbl	4(r5),r1
+	bicl2	#h_hidden,r1
+	addl2	r5,r1
+	addl2	#6,r1			; xt
+	movzbl	-1(r1),r2
+	bicl3	#^c<m_inlen>,r2,r3
+	beql	40$
+	bbc	#5,r2,30$
+	addl2	#2,r1
+30$:	addl3	r6,r3,r0		; within the code?
+	cmpl	r0,r7
+	bgtru	40$
+	pushl	r5
+	pushl	r3
+	cmpc3	r3,(r1),(r6)
+	movl	(sp)+,r1
+	movl	(sp)+,r0
+	beql	60$
+40$:	movl	(r5),r5
+	brb	20$
+50$:	movl	4(r8),r8
+	bneq	10$
+	clrl	r0
+60$:	rsb
+
+;+++
+;s> s_seeout -- type the counted string at r6 (and a space).
+;---
+s_seeout:
+	movzbl	(r6)+,r7
+	addl2	r7,v_col
+	incl	v_col
+	jsb	s_typer6
+	brw	space
+
+;+++
+;s> s_seenum -- type r0 as a signed number.
+;---
+s_seenum:
+	movl	r0,-(r11)
+	jsb	stod
+	jsb	s_dstr
+	addl2	(r11),v_col
+	incl	v_col
+	jsb	type
+	brw	space
+
+;+++
+;t> SEE -- ( "name" -- )
+;---
+	defword	see,^~SEE~
+	jsb	s_findname
+	clrl	v_col
+	pushl	r1			; xt
+	pushl	r0			; nt
+	moval	v_seecolon,r6
+	jsb	s_seeout
+	movl	(sp)+,r0
+	jsb	s_typename
+	movl	(sp)+,r6
+	jsb	s_seeword
+	movl	r7,-(sp)		; the end
+10$:	movl	(sp),r7
+	cmpl	r6,r7
+	blssu	15$
+	brw	90$
+15$:	jsb	s_seecol
+	cmpw	(r6),#op_jsb!<adm_abs@8> ; JSB @#?
+	beql	.+4
+	brw	30$
+	movl	2(r6),r1
+	cmpl	r1,#do_slit		; a string
+	bneq	20$
+	addl2	#6,r6			; past the JSB
+	movl	(r6)+,r7		; its length
+	pushl	r6
+	pushl	r7
+	moval	v_seesq,r6
+	jsb	s_seeout
+	movl	(sp),r7
+	movl	4(sp),r6
+	addl2	r7,v_col
+	jsb	s_typer6
+	movl	#^a/"/,r0
+	jsb	s_emit
+	jsb	space
+	movl	(sp)+,r7
+	movl	(sp)+,r6
+	addl2	r7,r6
+	brw	10$
+20$:	jsb	s_xtname		; a call: by name
+	tstl	r0
+	beql	25$
+	pushl	r6
+	jsb	s_typename
+	movl	(sp)+,r6
+	addl2	#6,r6
+	brw	10$
+25$:	movl	2(r6),r0		; to somewhere unnamed
+	pushl	r6
+	moval	v_seecall,r6
+	jsb	s_seeout
+	jsb	s_seenum
+	movl	(sp)+,r6
+	addl2	#6,r6
+	brw	10$
+30$:	cmpw	(r6),#op_jmp!<adm_abs@8> ; JMP @#
+	bneq	40$
+	movl	2(r6),r0
+	pushl	r6
+	moval	v_seebr,r6
+	jsb	s_seeout
+	jsb	s_seenum
+	movl	(sp)+,r6
+	addl2	#6,r6
+	brw	10$
+40$:	cmpb	(r6),#op_movl		; a literal?
+	bneq	50$
+	cmpb	2(r6),#adm_adec_r11
+	bneq	45$
+	movzbl	1(r6),r0
+	cmpl	r0,#63
+	bgtru	45$
+	pushl	r6
+	jsb	s_seenum
+	movl	(sp)+,r6
+	addl2	#3,r6
+	brw	10$
+45$:	cmpb	1(r6),#adm_imm
+	bneq	60$
+	cmpb	6(r6),#adm_adec_r11
+	bneq	60$
+	movl	2(r6),r0
+	pushl	r6
+	jsb	s_seenum
+	movl	(sp)+,r6
+	addl2	#7,r6
+	brw	10$
+50$:	cmpb	(r6),#op_mnegl
+	bneq	55$
+	cmpb	2(r6),#adm_adec_r11
+	bneq	60$
+	movzbl	1(r6),r0
+	mnegl	r0,r0
+	pushl	r6
+	jsb	s_seenum
+	movl	(sp)+,r6
+	addl2	#3,r6
+	brw	10$
+55$:	cmpl	(r6),#op_tstl!<adm_wdisp_sp@8>!<<-c_probe>@16>
+	bneq	57$
+	addl2	#4,r6			; the probe: not shown
+	brw	10$
+57$:	cmpb	(r6),#op_rsb		; RSB: EXIT
+	bneq	60$
+	pushl	r6
+	moval	v_seeexit,r6
+	jsb	s_seeout
+	movl	(sp)+,r6
+	incl	r6
+	brw	10$
+60$:	jsb	s_seeinline		; some word's inline code?
+	tstl	r0
+	beql	70$
+	pushl	r1
+	pushl	r6
+	jsb	s_typename
+	movl	(sp)+,r6
+	addl2	(sp)+,r6
+	brw	10$
+70$:	movzbl	(r6)+,r0		; just a byte
+	pushl	r6
+	movl	#2,r1
+	jsb	s_hex
+	jsb	space
+	addl2	#3,v_col
+	movl	(sp)+,r6
+	brw	10$
+90$:	tstl	(sp)+
+	brw	s_endline
+
+v_seecolon:	cstring	<:>
+v_seesq:	cstring	<S">
+v_seecall:	cstring	<CALL>
+v_seebr:	cstring	<JMP>
+v_seeexit:	cstring	<EXIT>

@@ -1,0 +1,182 @@
+	newpage	<Starting and Stopping>
+;******************************************************************************
+;
+; VFMAIN.MAR -- the entry point, the condition handler and BYE.  This is
+; the last of the VFORTH sources.
+;
+;******************************************************************************
+	.psect	vf_code
+
+;+++
+;t> BYE -- ( -- ) leave VFORTH.
+;---
+	defword	bye,^~BYE~
+	jsb	s_flushall
+	jsb	s_closeall		; close any open files
+	$exit_s	#ss$_normal
+
+	newpage	<The Condition Handler>
+;******************************************************************************
+;
+; s_handler -- the condition handler, established by the main procedure.
+; It turns a VMS exception into a Forth THROW: it chooses the THROW code,
+; then makes execution continue at r_sigthrow.  If the exception happened
+; in the Forth code itself (mechanism depth 0) it changes the PC in the
+; signal array and continues; if it happened in a procedure Forth called,
+; it unwinds to the main procedure with r_sigthrow as the new PC.
+;
+; Exceptions that are not errors (success, informational and warning
+; severity) and the debugger's breakpoints and trace traps are passed on.
+;
+;******************************************************************************
+	.psect	vf_data
+v_unwdepth:	.long	0		; depth for $UNWIND
+	.psect	vf_code
+
+	.entry	s_handler,^m<r2,r3,r4,r5>
+	movl	chf$l_sigarglst(ap),r2
+	movl	chf$l_sig_name(r2),r3
+	cmpl	r3,#ss$_unwind		; being unwound?
+	beql	5$
+	cmpl	r3,#ss$_break		; the debugger's?
+	beql	5$
+	cmpl	r3,#ss$_tbit
+	beql	5$
+	cmpl	r3,#ss$_controlc	; Ctrl/C
+	bneq	6$
+	movl	#t_interrupt,r4
+	brw	50$
+5$:	movl	#ss$_resignal,r0
+	ret
+6$:	bicl3	#^c<sts$m_severity>,r3,r0
+	cmpl	r0,#sts$k_error		; errors and severe errors only
+	beql	10$
+	cmpl	r0,#sts$k_severe
+	bneq	5$
+10$:	moval	v_sigmap,r1		; look up a Forth code
+20$:	movl	(r1)+,r0
+	beql	40$
+	cmpl	r0,r3
+	beql	30$
+	tstl	(r1)+
+	brb	20$
+30$:	movl	(r1),r4
+	cmpl	r3,#ss$_accvio		; an access violation?
+	bneq	50$
+	movl	12(r2),r0		; yes: in a guard page?
+	moval	v_guards,r1
+35$:	tstl	(r1)
+	beql	50$
+	cmpl	r0,(r1)
+	blssu	37$
+	cmpl	r0,4(r1)
+	bgtru	37$
+	movl	8(r1),r4		; yes, that stack's code
+	brb	50$
+37$:	addl2	#12,r1
+	brb	35$
+40$:	extzv	#sts$v_fac_no,#sts$s_fac_no,r3,r0
+	cmpl	r0,#c_mthfac		; from the MTH$ library?
+	bneq	45$
+	movl	#t_finvalid,r4
+	brb	50$
+45$:	movl	r3,r4			; any other: THROW the VMS code
+50$:	movl	r4,v_sigthrow
+	movl	chf$l_mcharglst(ap),r1
+	movl	chf$l_mch_depth(r1),r0
+	bneq	60$
+	movl	(r2),r0			; continue at r_sigthrow
+	moval	r_sigthrow,-4(r2)[r0]	; the PC, next to last
+	bicl2	#^x08000000,(r2)[r0]	; clear first-part-done in the PSL
+	movl	#ss$_continue,r0
+	ret
+60$:	movl	r0,v_unwdepth		; unwind to the main procedure
+	$unwind_s depadr=v_unwdepth,newpc=r_sigthrow
+	ret
+
+c_mthfac = 22				; the MTH$ library's facility
+v_sigmap:				; VMS condition, Forth THROW code
+	.long	ss$_accvio,t_badaddr
+	.long	ss$_intdiv,t_divzero
+	.long	ss$_intovf,t_range
+	.long	ss$_decovf,t_range
+	.long	ss$_subrng,t_range
+	.long	ss$_fltdiv,t_fdivzero
+	.long	ss$_fltdiv_f,t_fdivzero
+	.long	ss$_fltovf,t_frange
+	.long	ss$_fltovf_f,t_frange
+	.long	ss$_fltund,t_funder
+	.long	ss$_fltund_f,t_funder
+	.long	ss$_roprand,t_finvalid
+	.long	0
+
+	newpage	<The Entry Point>
+;+++
+;s> vforth -- the main procedure.
+;---
+	.entry	vforth,^m<r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>
+	.if	df	ca_trapping
+	moval	s_handler,(fp)		; the condition handler
+	.endc
+	movl	fp,v_mainfp
+	moval	v_guards,r6		; make the guard pages no access
+10$:	tstl	(r6)
+	beql	20$
+	$setprt_s inadr=(r6),prot=#prt$c_na
+	addl2	#12,r6
+	brb	10$
+20$:	movl	#vs_rstop,sp		; VFORTH's own stacks
+	movl	#vs_dstop,r11
+	movl	#vs_fstop,r9
+	clrl	r10
+	moval	forth,r0		; FORTH names the FORTH word list
+	subl2	#6+5,r0
+	movl	r0,wid_forth+8
+	jsb	s_terminit
+	tstl	v_interm		; greet a person
+	beql	30$
+	moval	v_greeting,r6
+	movzbl	(r6)+,r7
+	jsb	s_typer6
+	jsb	s_endline
+30$:	jsb	s_cmdline
+	brw	r_quit
+
+v_greeting:
+	cstring	<VFORTH V0.1, a Forth 2012 system for VAX/VMS.  Type BYE to leave.>
+
+;+++
+;s> s_cmdline -- include the files named on the command line (as a
+;	foreign command).
+;---
+s_cmdline:
+	movw	#256,v_tmpdsc
+	moval	v_cmdline,v_tmpdsc+4
+	pushaw	v_cmdlen
+	clrl	-(sp)
+	pushaq	v_tmpdsc
+	calls	#3,g^lib$get_foreign
+	blbc	r0,90$
+	movzwl	v_cmdlen,v_srclen
+	beql	90$
+	moval	v_cmdline,v_srcaddr
+	mnegl	#1,v_srcid
+	clrl	v_toin
+10$:	jsb	parsename
+	tstl	(r11)
+	beql	80$
+	movl	#included,-(r11)
+	jsb	catch
+	movl	(r11)+,r0
+	beql	10$
+	jsb	s_report		; an error: say so and stop
+	movl	#vs_dstop,r11
+	clrl	v_errwhere
+	rsb
+80$:	addl2	#8,r11
+90$:	rsb
+
+	.psect	vf_code
+vl_forth_last = vl_forth		; the last words in the built-in
+vl_env_last = vl_env			; word lists
+	.end	vforth

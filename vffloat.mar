@@ -1,0 +1,1169 @@
+	newpage	<Floating Point>
+;******************************************************************************
+;
+; VFFLOAT.MAR -- the Floating-Point word set.
+;
+; Floating-point numbers are VAX G_floating: 8 bytes, an 11-bit exponent and
+; a 53-bit fraction (with the hidden bit), about 15.9 decimal digits, range
+; about 0.56E-308 to 0.9E308.  There are no infinities, NaNs or minus zero;
+; a G_floating with its sign set and a zero exponent is a reserved operand,
+; and using one faults (THROW -46).  Overflow and division by zero fault
+; (-43, -42); underflow gives zero.  DFLOATs are the same as FLOATs, and
+; SFLOATs are F_floating, 4 bytes.  Floats are aligned like cells: the VAX
+; doesn't need more.
+;
+; r9 is the floating-point stack pointer, the top item at (r9).
+;
+; Text is converted to G_floating by OTS$CVT_T_G after VFORTH checks the
+; syntax and rewrites it in the form [-]digits.digitsE[sign]digits;
+; G_floating is converted to text, by REPRESENT, exactly, with big-integer
+; arithmetic.  The transcendental functions are the MTH$ library's.
+;
+;******************************************************************************
+	.extrn	ots$cvt_t_g
+	.extrn	mth$gsqrt, mth$gsin, mth$gcos, mth$gtan
+	.extrn	mth$gasin, mth$gacos, mth$gatan, mth$gatan2
+	.extrn	mth$gexp, mth$glog, mth$glog10
+	.extrn	mth$gsinh, mth$gcosh, mth$gtanh
+
+c_maxprec	= 36			; most digits SET-PRECISION allows
+c_big		= 40			; longwords in a big integer
+
+	.psect	vf_data
+g_zero:		.g_floating	0.0
+g_half:		.g_floating	0.5
+g_one:		.g_floating	1.0
+g_two:		.g_floating	2.0
+g_ten:		.g_floating	10.0
+g_2p31:		.g_floating	2147483648.0
+g_2p32:		.g_floating	4294967296.0
+g_2m32:		.g_floating	2.3283064365386962890625E-10
+g_2p52:		.g_floating	4503599627370496.0
+g_maxfloat:	.long	^xFFFF7FFF,^xFFFFFFFF	; the largest G_floating
+v_precision:	.long	15		; significant digits for F. FE. FS.
+v_fval:		.quad	0		; s_fparse's result
+v_fdesc:	.word	0		; descriptor of
+		.byte	dsc$k_dtype_t,dsc$k_class_s
+		.long	v_fnorm
+v_fnorm:	.blkb	256		; the rewritten number
+v_fn:		.long	0		; REPRESENT's exponent
+v_fneg:		.long	0		;   and sign
+v_fdig:		.blkb	c_maxprec	; digits for F. FE. FS.
+v_bigr:		.blkl	c_big		; big integers for REPRESENT
+v_bigs:		.blkl	c_big
+v_bigt:		.blkl	c_big
+	.psect	vf_code
+
+	newpage	<Floating Point: Stack and Memory>
+;+++
+;f> FDUP FDROP FSWAP FOVER FROT FDEPTH
+;---
+	defword	fdup,^~FDUP~,inl=1
+	movq	(r9),-(r9)
+fdup_e:	rsb
+
+	defword	fdrop,^~FDROP~,inl=1
+	addl2	#8,r9
+fdrop_e: rsb
+
+	defword	fswap,^~FSWAP~,inl=1
+	movq	(r9),r0
+	movq	8(r9),(r9)
+	movq	r0,8(r9)
+fswap_e: rsb
+
+	defword	fover,^~FOVER~,inl=1
+	movq	8(r9),-(r9)
+fover_e: rsb
+
+	defword	frot,^~FROT~
+	movq	16(r9),r0
+	movq	8(r9),16(r9)
+	movq	(r9),8(r9)
+	movq	r0,(r9)
+	rsb
+
+	defword	fdepth,^~FDEPTH~
+	subl3	r9,#vs_fstop,r0
+	ashl	#-3,r0,-(r11)
+	rsb
+
+;+++
+;f> F@ F! DF@ DF! SF@ SF!
+;---
+	defword	ffetch,^~F@~,inl=1
+	movq	@(r11)+,-(r9)
+ffetch_e: rsb
+
+	defword	fstore,^~F!~,inl=1
+	movq	(r9)+,@(r11)+
+fstore_e: rsb
+
+	defword	dffetch,^~DF@~,inl=1
+	movq	@(r11)+,-(r9)
+dffetch_e: rsb
+
+	defword	dfstore,^~DF!~,inl=1
+	movq	(r9)+,@(r11)+
+dfstore_e: rsb
+
+	defword	sffetch,^~SF@~,inl=1
+	cvtfg	@(r11)+,-(r9)
+sffetch_e: rsb
+
+	defword	sfstore,^~SF!~,inl=1
+	cvtgf	(r9)+,@(r11)+
+sfstore_e: rsb
+
+;+++
+;f> FLOAT+ FLOATS DFLOAT+ DFLOATS SFLOAT+ SFLOATS
+;---
+	defword	floatplus,^~FLOAT+~,inl=1
+	addl2	#8,(r11)
+floatplus_e: rsb
+
+	defword	floats,^~FLOATS~,inl=1
+	ashl	#3,(r11),(r11)
+floats_e: rsb
+
+	defword	dfloatplus,^~DFLOAT+~,inl=1
+	addl2	#8,(r11)
+dfloatplus_e: rsb
+
+	defword	dfloats,^~DFLOATS~,inl=1
+	ashl	#3,(r11),(r11)
+dfloats_e: rsb
+
+	defword	sfloatplus,^~SFLOAT+~,inl=1
+	addl2	#4,(r11)
+sfloatplus_e: rsb
+
+	defword	sfloats,^~SFLOATS~,inl=1
+	ashl	#2,(r11),(r11)
+sfloats_e: rsb
+
+;+++
+;f> FALIGN FALIGNED DFALIGN DFALIGNED SFALIGN SFALIGNED -- floats are
+;	aligned like cells.
+;---
+	defword	falign,^~FALIGN~
+	brw	align
+	defword	faligned,^~FALIGNED~
+	brw	aligned
+	defword	dfalign,^~DFALIGN~
+	brw	align
+	defword	dfaligned,^~DFALIGNED~
+	brw	aligned
+	defword	sfalign,^~SFALIGN~
+	brw	align
+	defword	sfaligned,^~SFALIGNED~
+	brw	aligned
+
+	newpage	<Floating Point: Defining Words>
+;+++
+;s> do_fconst, do_fvalue -- run time of FCONSTANT and FVALUE: push the
+;	float in the body.  (Separate, so TO can tell them apart.)
+;---
+do_fconst:
+	movl	(sp)+,r0
+	movq	(r0),-(r9)
+	rsb
+do_fvalue:
+	movl	(sp)+,r0
+	movq	(r0),-(r9)
+	rsb
+
+;+++
+;f> FCONSTANT -- ( "name" -- ) ( F: r -- )
+;f> FVALUE -- ( "name" -- ) ( F: r -- )
+;---
+	defword	fconstant,^~FCONSTANT~
+	movl	#do_fconst,r2
+r_fconstant:
+	pushl	r2
+	jsb	s_parsehdr
+	movl	(sp)+,r0
+	jsb	s_cjsb
+	movl	(r9)+,r0
+	jsb	s_cl
+	movl	(r9)+,r0
+	brw	s_cl
+
+	defword	fvalue,^~FVALUE~
+	movl	#do_fvalue,r2
+	brb	r_fconstant
+
+;+++
+;f> FVARIABLE -- ( "name" -- )
+;---
+	defword	fvariable,^~FVARIABLE~
+	jsb	create
+	clrl	r0
+	jsb	s_cl
+	clrl	r0
+	brw	s_cl
+
+;+++
+;f> FFIELD: DFFIELD: SFFIELD: -- ( n1 "name" -- n2 )
+;---
+	defword	ffieldc,^~FFIELD:~
+	jsb	aligned
+	movl	#8,-(r11)
+	brw	plusfield
+
+	defword	dffieldc,^~DFFIELD:~
+	jsb	aligned
+	movl	#8,-(r11)
+	brw	plusfield
+
+	defword	sffieldc,^~SFFIELD:~
+	jsb	aligned
+	movl	#4,-(r11)
+	brw	plusfield
+
+;+++
+;s> s_flitcomp -- compile the float on top of the floating-point stack as
+;	a literal: MOVQ #r,-(R9).
+;f> FLITERAL -- ( F: r -- )
+;---
+s_flitcomp:
+	movzwl	#op_movq!<adm_imm@8>,r0
+	jsb	s_cw
+	movl	(r9)+,r0
+	jsb	s_cl
+	movl	(r9)+,r0
+	jsb	s_cl
+	movl	#adm_adec_r9,r0
+	brw	s_cb
+
+	defword	fliteral,^~FLITERAL~,f_imm!f_conly
+	brw	s_flitcomp
+
+	newpage	<Floating Point: Arithmetic>
+;+++
+;f> F+ F- F* F/ FNEGATE FABS
+;---
+	defword	fplus,^~F+~,inl=1
+	addg2	(r9)+,(r9)
+fplus_e: rsb
+
+	defword	fminus,^~F-~,inl=1
+	subg2	(r9)+,(r9)
+fminus_e: rsb
+
+	defword	fstar,^~F*~,inl=1
+	mulg2	(r9)+,(r9)
+fstar_e: rsb
+
+	defword	fslash,^~F/~,inl=1
+	divg2	(r9)+,(r9)
+fslash_e: rsb
+
+	defword	fnegate,^~FNEGATE~,inl=1
+	mnegg	(r9),(r9)
+fnegate_e: rsb
+
+	defword	fabs,^~FABS~,inl=1
+	tstg	(r9)
+	bgeq	fabs_e
+	mnegg	(r9),(r9)
+fabs_e:	rsb
+
+;+++
+;f> F0< F0= F< -- ( -- flag ) ( F: r -- ) and ( F: r1 r2 -- )
+;---
+	defword	fzless,^~F0<~,inl=1
+	tstg	(r9)+
+	bgeq	10$
+	mnegl	#1,-(r11)
+	brb	fzless_e
+10$:	clrl	-(r11)
+fzless_e: rsb
+
+	defword	fzeq,^~F0=~,inl=1
+	tstg	(r9)+
+	bneq	10$
+	mnegl	#1,-(r11)
+	brb	fzeq_e
+10$:	clrl	-(r11)
+fzeq_e:	rsb
+
+	defword	fless,^~F<~
+	cmpg	8(r9),(r9)
+	blss	10$
+	clrl	r0
+	brb	20$
+10$:	mnegl	#1,r0
+20$:	addl2	#16,r9
+	movl	r0,-(r11)
+	rsb
+
+;+++
+;f> FMAX FMIN -- ( F: r1 r2 -- r3 )
+;---
+	defword	fmax,^~FMAX~
+	cmpg	(r9),8(r9)
+	bleq	10$
+	movq	(r9),8(r9)
+10$:	addl2	#8,r9
+	rsb
+
+	defword	fmin,^~FMIN~
+	cmpg	(r9),8(r9)
+	bgeq	10$
+	movq	(r9),8(r9)
+10$:	addl2	#8,r9
+	rsb
+
+;+++
+;f> F~ -- ( -- flag ) ( F: r1 r2 r3 -- ) with r3 positive, is |r1-r2| less
+;	than r3; zero, are r1 and r2 the same bits; negative, is |r1-r2|
+;	less than |r3|*(|r1|+|r2|)?
+;---
+	.long	vl_forth		; (by hand: defword can't take a ~)
+	vl_forth = . - 4
+	.byte	2
+	.ascii	/F~/
+	.byte	0
+fprox:
+	tstg	(r9)
+	bneq	20$
+	cmpl	8(r9),16(r9)		; the same bits?
+	bneq	80$
+	cmpl	12(r9),20(r9)
+	bneq	80$
+	brb	70$
+20$:	subg3	8(r9),16(r9),r0		; |r1-r2|
+	bicl2	#^x8000,r0
+	tstg	(r9)
+	blss	30$
+	cmpg	r0,(r9)
+	blss	70$
+	brb	80$
+30$:	movq	16(r9),r2		; |r1|+|r2|
+	bicl2	#^x8000,r2
+	movq	8(r9),r4
+	bicl2	#^x8000,r4
+	addg2	r4,r2
+	movq	(r9),r4			; times |r3|
+	bicl2	#^x8000,r4
+	mulg2	r4,r2
+	cmpg	r0,r2
+	blss	70$
+80$:	addl2	#24,r9
+	clrl	-(r11)
+	rsb
+70$:	addl2	#24,r9
+	mnegl	#1,-(r11)
+	rsb
+
+;+++
+;s> s_ffrac -- the fraction part of the float at (r9), with its sign, in
+;	r2, r3.  Uses r0-r3.
+;---
+s_ffrac:
+	movq	(r9),r0
+	bicl2	#^x8000,r0
+	cmpg	r0,g_2p52		; 2**52 or more is a whole number
+	blss	10$
+	clrq	r2
+	rsb
+10$:	emodg	g_one,#0,(r9),r0,r2
+	rsb
+
+;+++
+;f> FTRUNC FLOOR FROUND -- ( F: r1 -- r2 )
+;---
+	defword	ftrunc,^~FTRUNC~
+	jsb	s_ffrac
+	subg2	r2,(r9)
+	rsb
+
+	defword	floor,^~FLOOR~
+	jsb	s_ffrac
+	subg2	r2,(r9)
+	tstg	r2
+	bgeq	10$
+	subg2	g_one,(r9)
+10$:	rsb
+
+	defword	fround,^~FROUND~	; round to nearest, ties to even
+	movq	(r9),r4
+	jsb	floor
+	subg3	(r9),r4,r4		; r4 = r1 - floor(r1), 0 <= r4 < 1
+	cmpg	r4,g_half
+	blss	20$
+	bgtr	10$
+	emodg	g_half,#0,(r9),r0,r2	; a tie: is the floor even?
+	tstg	r2
+	beql	20$
+10$:	addg2	g_one,(r9)
+20$:	rsb
+
+;+++
+;f> D>F -- ( d -- ) ( F: -- r )  S>F -- ( n -- ) ( F: -- r )
+;---
+	defword	dtof,^~D>F~
+	cvtlg	(r11)+,r0		; high * 2**32
+	mulg2	g_2p32,r0
+	cvtlg	(r11)+,r2		; + the low cell, unsigned
+	bgeq	10$
+	addg2	g_2p32,r2
+10$:	addg3	r0,r2,-(r9)
+	rsb
+
+	defword	stof,^~S>F~,inl=1
+	cvtlg	(r11)+,-(r9)
+stof_e:	rsb
+
+;+++
+;f> F>D -- ( -- d ) ( F: r -- )  F>S -- ( -- n ) ( F: r -- ) both
+;	truncate.
+;---
+	defword	ftod,^~F>D~
+	jsb	ftrunc
+	movq	(r9),r4			; t, a whole number
+	mulg2	g_2m32,(r9)		; high = floor(t / 2**32)
+	jsb	floor
+	movq	(r9)+,r2
+	cvtgl	r2,r0
+	mulg2	g_2p32,r2		; low = t - high * 2**32
+	subg2	r2,r4
+	cmpg	r4,g_2p31
+	blss	10$
+	subg2	g_2p32,r4
+10$:	cvtgl	r4,-(r11)
+	movl	r0,-(r11)
+	rsb
+
+	defword	ftos,^~F>S~,inl=1
+	cvtgl	(r9)+,-(r11)
+ftos_e:	rsb
+
+	newpage	<Floating Point: Functions>
+;+++
+;f> F** -- ( F: r1 r2 -- r3 ) r1 to the power r2.  Whole powers are done
+;	by multiplication, so they are exact when they can be, and can have
+;	a negative base.
+;---
+	defword	fstarstar,^~F**~
+	jsb	s_ffrac			; r2 a whole number?
+	tstg	r2
+	bneq	50$
+	movq	(r9),r0
+	bicl2	#^x8000,r0
+	cmpg	r0,g_2p31
+	bgeq	50$
+	cvtgl	(r9)+,r4		; yes: n
+	movq	(r9),r0			; b = r1
+	movl	r4,r5
+	bgeq	10$
+	mnegl	r5,r5
+	extzv	#4,#11,r0,r2		; |r1| >= 1 and a big negative power?
+	subl2	#1024,r2
+	bleq	10$
+	divl3	r2,#1000,r3
+	cmpl	r5,r3
+	bleq	10$
+	divg3	r0,g_one,r0		; yes: use 1/r1, to underflow, not
+	movl	r5,r4			; overflow
+10$:	movq	g_one,r2		; result
+12$:	tstl	r5
+	beql	30$
+	blbc	r5,20$
+	mulg2	r0,r2
+20$:	ashl	#-1,r5,r5
+	beql	30$
+	mulg2	r0,r0
+	brb	12$
+30$:	tstl	r4			; a negative power?
+	bgeq	40$
+	divg3	r2,g_one,r2
+40$:	movq	r2,(r9)
+	rsb
+50$:	tstg	8(r9)			; exp(r2 * ln r1)
+	bgtr	60$
+	blss	55$
+	tstg	(r9)			; 0 to a power
+	bgtr	52$
+	throw	t_fdivzero
+52$:	addl2	#8,r9
+	clrq	(r9)
+	rsb
+55$:	throw	t_finvalid
+60$:	pushab	8(r9)
+	calls	#1,g^mth$glog
+	mulg2	(r9)+,r0
+	movq	r0,(r9)
+	pushl	r9
+	calls	#1,g^mth$gexp
+	movq	r0,(r9)
+	rsb
+
+;+++
+;f> FALOG -- ( F: r1 -- r2 ) 10 to the power r1.
+;---
+	defword	falog,^~FALOG~
+	movq	(r9),r0
+	movq	g_ten,(r9)
+	movq	r0,-(r9)
+	brw	fstarstar
+
+;+++
+;f> FSQRT FSIN FCOS FTAN FASIN FACOS FATAN FEXP FLN FLOG FSINH FCOSH
+;f> FTANH -- ( F: r1 -- r2 ) by the MTH$ library.
+;---
+	.macro	mthfun lbl,name,routine
+	defword	lbl,^~name~
+	pushl	r9
+	calls	#1,g^routine
+	movq	r0,(r9)
+	rsb
+	.endm	mthfun
+
+	mthfun	fsqrt,FSQRT,mth$gsqrt
+	mthfun	fsin,FSIN,mth$gsin
+	mthfun	fcos,FCOS,mth$gcos
+	mthfun	ftan,FTAN,mth$gtan
+	mthfun	fasin,FASIN,mth$gasin
+	mthfun	facos,FACOS,mth$gacos
+	mthfun	fatan,FATAN,mth$gatan
+	mthfun	fexp,FEXP,mth$gexp
+	mthfun	fln,FLN,mth$glog
+	mthfun	flog,FLOG,mth$glog10
+	mthfun	fsinh,FSINH,mth$gsinh
+	mthfun	fcosh,FCOSH,mth$gcosh
+	mthfun	ftanh,FTANH,mth$gtanh
+
+;+++
+;f> FSINCOS -- ( F: r1 -- r2 r3 ) sine and cosine.
+;---
+	defword	fsincos,^~FSINCOS~
+	pushl	r9
+	calls	#1,g^mth$gsin
+	movq	r0,r2
+	pushl	r9
+	calls	#1,g^mth$gcos
+	movq	r2,(r9)
+	movq	r0,-(r9)
+	rsb
+
+;+++
+;f> FATAN2 -- ( F: r1 r2 -- r3 ) the angle of the point (r2, r1).
+;---
+	defword	fatan2,^~FATAN2~
+	tstg	(r9)			; (0, 0): say 0
+	bneq	10$
+	tstg	8(r9)
+	bneq	10$
+	addl2	#8,r9
+	rsb
+10$:	pushl	r9
+	pushab	8(r9)
+	calls	#2,g^mth$gatan2
+	addl2	#8,r9
+	movq	r0,(r9)
+	rsb
+
+;+++
+;f> FEXPM1 -- ( F: r1 -- r2 ) e to the r1, minus 1.  For small r1 it is
+;	2t/(1-t) with t = tanh(r1/2), to keep the precision.
+;---
+	defword	fexpm1,^~FEXPM1~
+	movq	(r9),r0
+	bicl2	#^x8000,r0
+	cmpg	r0,g_half
+	blss	10$
+	pushl	r9
+	calls	#1,g^mth$gexp
+	subg3	g_one,r0,(r9)
+	rsb
+10$:	mulg2	g_half,(r9)
+	pushl	r9
+	calls	#1,g^mth$gtanh
+	mulg3	g_two,r0,r2
+	subg3	r0,g_one,r4
+	divg3	r4,r2,(r9)
+	rsb
+
+;+++
+;f> FLNP1 -- ( F: r1 -- r2 ) ln(1+r1), as ln(u)*r1/(u-1) with u = 1+r1
+;	to keep the precision.
+;---
+	defword	flnp1,^~FLNP1~
+	addg3	g_one,(r9),r2
+	cmpg	r2,g_one
+	bneq	10$
+	rsb				; ln(1+r1) is r1
+10$:	movq	r2,-(sp)
+	pushl	sp
+	calls	#1,g^mth$glog
+	movq	(sp)+,r2
+	mulg2	(r9),r0
+	subg2	g_one,r2
+	divg3	r2,r0,(r9)
+	rsb
+
+;+++
+;f> FASINH FACOSH FATANH -- ( F: r1 -- r2 )
+;---
+	defword	fasinh,^~FASINH~	; lnp1(a + a*a/(1+sqrt(a*a+1))), a = |r1|
+	movq	(r9),r4			; (the sign)
+	bicl2	#^x8000,(r9)
+	mulg3	(r9),(r9),r2
+	addg3	g_one,r2,-(r9)
+	pushl	r9
+	calls	#1,g^mth$gsqrt
+	addl2	#8,r9
+	addg2	g_one,r0
+	divg3	r0,r2,r2
+	addg2	r2,(r9)
+	jsb	flnp1
+	tstg	r4
+	bgeq	10$
+	mnegg	(r9),(r9)
+10$:	rsb
+
+	defword	facosh,^~FACOSH~	; ln(r1 + sqrt(r1*r1-1))
+	mulg3	(r9),(r9),r2
+	subg3	g_one,r2,-(r9)
+	pushl	r9
+	calls	#1,g^mth$gsqrt
+	addl2	#8,r9
+	addg2	r0,(r9)
+	pushl	r9
+	calls	#1,g^mth$glog
+	movq	r0,(r9)
+	rsb
+
+	defword	fatanh,^~FATANH~	; lnp1(2*r1/(1-r1))/2
+	subg3	(r9),g_one,r2
+	mulg3	g_two,(r9),r0
+	divg3	r2,r0,(r9)
+	jsb	flnp1
+	mulg2	g_half,(r9)
+	rsb
+
+	newpage	<Floating Point: Input>
+;+++
+;s> s_fparse -- convert the string r6, r7 to a float in v_fval, with the
+;	text interpreter's syntax if r8 = 0, >FLOAT's if r8 = 1.  r0 = 1 if
+;	it is one, else 0.  Uses r0-r5.
+;
+;	text interpreter: [sign] digits [. digits0] e-char [sign] digits0
+;	>FLOAT:  [sign] (digits [. digits0] | . digits)
+;		 [(e-char | d-char) [sign] digits0 | sign digits0]
+;---
+s_fparse:
+	moval	v_fnorm,r2
+	movl	r6,r1
+	movl	r7,r3
+	clrl	r4			; digits in the significand
+	cmpl	r3,#200
+	bleq	.+4
+	brw	99$
+	tstl	r3
+	bgtr	.+4
+	brw	99$
+	cmpb	(r1),#^a/-/
+	bneq	2$
+	movb	(r1)+,(r2)+
+	decl	r3
+	brb	5$
+2$:	cmpb	(r1),#^a/+/
+	bneq	5$
+	incl	r1
+	decl	r3
+5$:	tstl	r3			; digits
+	bleq	8$
+	cmpb	(r1),#^a/0/
+	blssu	8$
+	cmpb	(r1),#^a/9/
+	bgtru	8$
+	movb	(r1)+,(r2)+
+	decl	r3
+	incl	r4
+	brb	5$
+8$:	tstl	r8			; the interpreter wants one first
+	bneq	9$
+	tstl	r4
+	bneq	.+4
+	brw	99$
+9$:	tstl	r3			; . digits0
+	bleq	12$
+	cmpb	(r1),#^a/./
+	bneq	12$
+	movb	(r1)+,(r2)+
+	decl	r3
+10$:	tstl	r3
+	bleq	12$
+	cmpb	(r1),#^a/0/
+	blssu	12$
+	cmpb	(r1),#^a/9/
+	bgtru	12$
+	movb	(r1)+,(r2)+
+	decl	r3
+	incl	r4
+	brb	10$
+12$:	tstl	r4			; no digits at all?
+	bneq	.+4
+	brw	99$
+	movb	#^a/E/,(r2)+
+	tstl	r3			; the exponent
+	bgtr	14$
+	tstl	r8			; none: the interpreter needs one
+	bneq	.+4
+	brw	99$
+	brb	20$
+14$:	movzbl	(r1),r0
+	bicb2	#^x20,r0		; (upper case)
+	cmpb	r0,#^a/E/
+	beql	15$
+	tstl	r8
+	bneq	.+4
+	brw	99$
+	cmpb	r0,#^a/D/
+	beql	15$
+	cmpb	(r1),#^a/+/		; >FLOAT: just a sign will do
+	beql	16$
+	cmpb	(r1),#^a/-/
+	beql	16$
+	brb	99$
+15$:	incl	r1
+	decl	r3
+	tstl	r3
+	bleq	20$
+	cmpb	(r1),#^a/+/
+	beql	16$
+	cmpb	(r1),#^a/-/
+	bneq	17$
+16$:	movb	(r1)+,(r2)+
+	decl	r3
+17$:	clrl	r4			; digits0
+18$:	tstl	r3
+	bleq	19$
+	cmpb	(r1),#^a/0/
+	blssu	19$
+	cmpb	(r1),#^a/9/
+	bgtru	19$
+	movb	(r1)+,(r2)+
+	decl	r3
+	incl	r4
+	brb	18$
+19$:	tstl	r4
+	bneq	21$
+20$:	movb	#^a/0/,(r2)+
+21$:	tstl	r3			; anything left over?
+	bneq	99$
+	subl3	#v_fnorm,r2,r0
+	movw	r0,v_fdesc
+	pushl	#0			; flags
+	pushl	#0			; scale factor
+	pushl	#0			; digits in the fraction
+	pushaq	v_fval
+	pushaq	v_fdesc
+	calls	#5,g^ots$cvt_t_g
+	blbc	r0,99$
+	bitw	#^x7FF0,v_fval		; a zero (-0 too) is all zero bits;
+	bneq	98$			; a -0 would be a reserved operand
+	clrq	v_fval
+98$:	movl	#1,r0
+	rsb
+99$:	clrl	r0
+	rsb
+
+;+++
+;s> s_fnumber -- ( c-addr u -- flag ) ( F: -- r | ) the text interpreter's
+;	floating-point numbers, when BASE is decimal.
+;---
+s_fnumber:
+	cmpl	v_base,#10
+	beql	5$
+	addl2	#4,r11
+	clrl	(r11)
+	rsb
+5$:	pushr	#^m<r6,r7,r8>
+	movl	(r11)+,r7
+	movl	(r11),r6
+	clrl	r8
+	jsb	s_fparse
+	popr	#^m<r6,r7,r8>
+	blbc	r0,10$
+	movq	v_fval,-(r9)
+	mnegl	#1,(r11)
+	rsb
+10$:	clrl	(r11)
+	rsb
+
+;+++
+;f> >FLOAT -- ( c-addr u -- true | false ) ( F: -- r | ) a string of
+;	blanks is zero.
+;---
+	defword	tofloat,^~>FLOAT~
+	movl	(r11)+,r7
+	movl	(r11)+,r6
+	movl	r7,r0			; all blanks?
+	movl	r6,r1
+10$:	tstl	r0
+	bleq	15$
+	cmpb	(r1)+,#c_bl
+	bneq	20$
+	decl	r0
+	brb	10$
+15$:	clrq	-(r9)
+	mnegl	#1,-(r11)
+	rsb
+20$:	movl	#1,r8
+	jsb	s_fparse
+	blbc	r0,30$
+	movq	v_fval,-(r9)
+	mnegl	#1,-(r11)
+	rsb
+30$:	clrl	-(r11)
+	rsb
+
+	newpage	<Floating Point: Output>
+;******************************************************************************
+;
+; REPRESENT works exactly.  The float is M * 2**E, M a 53-bit integer;
+; it is made into a fraction R/S of big integers (R = M * 2**E, S = 1 or
+; R = M, S = 2**-E), S or R is multiplied by 10 until 0.1 <= R/S < 1,
+; counting the decimal exponent, and then each digit is the whole part of
+; 10 times what is left.  The last digit is rounded, ties to even.
+;
+; A big integer is c_big longwords, the least significant first.
+;
+;******************************************************************************
+;+++
+;s> b_clr -- r1 = 0.  Uses r0-r5.
+;s> b_copy -- r2 = r1.  Uses r0-r5.
+;s> b_mul10 -- r1 = r1 * 10.  Uses r2-r5.
+;s> b_cmp -- compare r1 with r2, unsigned: the condition codes are set as
+;	by CMPL r1,r2.  Uses r3.
+;s> b_sub -- r1 = r1 - r2.  b_add -- r1 = r1 + r2.  Use r1-r3.
+;s> b_setsh -- r1 = the quadword r2, r3 shifted left r4 bits.  Uses r0,
+;	r1, r4, r5.
+;---
+b_clr:	movc5	#0,(r1),#0,#c_big*4,(r1)
+	rsb
+
+b_copy:	movc3	#c_big*4,(r1),(r2)
+	rsb
+
+b_mul10:
+	movl	#c_big,r2
+	clrl	r3			; carry
+10$:	emul	(r1),#10,r3,r4
+	tstl	(r1)			; (EMUL is signed)
+	bgeq	20$
+	addl2	#10,r5
+20$:	movl	r4,(r1)+
+	movl	r5,r3
+	sobgtr	r2,10$
+	rsb
+
+b_cmp:	movl	#c_big,r3
+10$:	cmpl	-4(r1)[r3],-4(r2)[r3]
+	bneq	20$
+	sobgtr	r3,10$			; (leaves Z set, C clear)
+20$:	rsb
+
+b_sub:	movl	#c_big,r3
+	bicpsw	#psl$m_c
+10$:	sbwc	(r2)+,(r1)+		; (SOBGTR leaves C alone)
+	sobgtr	r3,10$
+	rsb
+
+b_add:	movl	#c_big,r3
+	bicpsw	#psl$m_c
+10$:	adwc	(r2)+,(r1)+
+	sobgtr	r3,10$
+	rsb
+
+b_setsh:
+	ashl	#-5,r4,r5		; longword
+	bicl2	#^c31,r4		; and bit
+	moval	(r1)[r5],r1
+	ashq	r4,r2,(r1)
+	subl3	#32,r4,r0
+	ashl	r0,r3,8(r1)
+	rsb
+
+;+++
+;s> s_repr -- REPRESENT the float popped from the floating-point stack in
+;	the r7 characters at r6: r0 = the exponent, r1 = true if it was
+;	negative.  Uses r0-r5.
+;---
+s_repr:	pushr	#^m<r6,r7,r8>
+	movq	(r9)+,r0
+	clrl	v_fneg
+	tstg	r0
+	bgeq	5$
+	mnegl	#1,v_fneg
+	mnegg	r0,r0
+5$:	tstg	r0
+	bneq	10$
+	movl	#1,v_fn			; zero: 0.000... E1
+	movc5	#0,(r6),#^a/0/,r7,(r6)
+	brw	90$
+10$:	movq	r0,v_fval
+	moval	v_bigr,r1
+	jsb	b_clr
+	moval	v_bigs,r1
+	jsb	b_clr
+	movq	v_fval,r0
+	rotl	#16,r0,r3		; M: high 21 bits
+	bicl2	#^c^x000FFFFF,r3
+	bisl2	#^x00100000,r3		; (the hidden bit)
+	rotl	#16,r1,r2		;   and low 32
+	extzv	#4,#11,r0,r4		; the exponent
+	subl2	#1077,r4		; float = M * 2**r4
+	blss	20$
+	moval	v_bigr,r1		; R = M * 2**E, S = 1
+	jsb	b_setsh
+	movl	#1,v_bigs
+	brb	30$
+20$:	movq	r2,v_bigr		; R = M, S = 2**-E
+	mnegl	r4,r4
+	movl	#1,r2
+	clrl	r3
+	moval	v_bigs,r1
+	jsb	b_setsh
+30$:	clrl	v_fn
+31$:	moval	v_bigr,r1		; until R < S: S = S*10
+	moval	v_bigs,r2
+	jsb	b_cmp
+	blssu	40$
+	moval	v_bigs,r1
+	jsb	b_mul10
+	incl	v_fn
+	brb	31$
+40$:	moval	v_bigr,r1		; while R*10 < S: R = R*10
+	moval	v_bigt,r2
+	jsb	b_copy
+	moval	v_bigt,r1
+	jsb	b_mul10
+	moval	v_bigt,r1
+	moval	v_bigs,r2
+	jsb	b_cmp
+	bgequ	50$
+	moval	v_bigt,r1
+	moval	v_bigr,r2
+	jsb	b_copy
+	decl	v_fn
+	brb	40$
+50$:	clrl	r8			; the digits
+51$:	cmpl	r8,r7
+	bgeq	60$
+	moval	v_bigr,r1
+	jsb	b_mul10
+	movl	#^a/0/,-(sp)
+52$:	moval	v_bigr,r1
+	moval	v_bigs,r2
+	jsb	b_cmp
+	blssu	53$
+	moval	v_bigr,r1
+	moval	v_bigs,r2
+	jsb	b_sub
+	incl	(sp)
+	brb	52$
+53$:	movl	(sp)+,r0
+	movb	r0,(r6)[r8]
+	incl	r8
+	brb	51$
+60$:	tstl	r7			; round: compare 2R with S
+	beql	90$
+	moval	v_bigr,r1
+	moval	v_bigt,r2
+	jsb	b_copy
+	moval	v_bigt,r1
+	moval	v_bigr,r2
+	jsb	b_add
+	moval	v_bigt,r1
+	moval	v_bigs,r2
+	jsb	b_cmp
+	blssu	90$
+	bgtru	70$
+	movzbl	-1(r6)[r7],r0		; a tie: round to even
+	blbc	r0,90$
+70$:	movl	r7,r8			; round up
+71$:	decl	r8
+	blss	75$
+	cmpb	(r6)[r8],#^a/9/
+	bneq	72$
+	movb	#^a/0/,(r6)[r8]
+	brb	71$
+72$:	incb	(r6)[r8]
+	brb	90$
+75$:	movb	#^a/1/,(r6)		; 999... became 1000...
+	incl	v_fn
+90$:	movl	v_fn,r0
+	movl	v_fneg,r1
+	popr	#^m<r6,r7,r8>
+	rsb
+
+;+++
+;f> REPRESENT -- ( c-addr u -- n flag1 flag2 ) ( F: r -- )
+;---
+	defword	represent,^~REPRESENT~
+	movl	(r11)+,r7
+	movl	(r11)+,r6
+	jsb	s_repr
+	movl	r0,-(r11)
+	movl	r1,-(r11)
+	mnegl	#1,-(r11)		; always valid
+	rsb
+
+;+++
+;f> PRECISION -- ( -- u )  SET-PRECISION -- ( u -- )
+;---
+	defword	precision,^~PRECISION~
+	movl	v_precision,-(r11)
+	rsb
+
+	defword	setprecision,^~SET-PRECISION~
+	movl	(r11)+,r0
+	bgtr	10$
+	movl	#1,r0
+10$:	cmpl	r0,#c_maxprec
+	bleq	20$
+	movl	#c_maxprec,r0
+20$:	movl	r0,v_precision
+	rsb
+
+;+++
+;s> s_fdigits -- REPRESENT the float popped from the floating-point
+;	stack in PRECISION digits at v_fdig, and output its sign: r8 = its
+;	exponent.
+;s> s_fexp -- output E and the exponent r0.
+;s> s_fzeros -- output r0 zeros.
+;---
+s_fdigits:
+	moval	v_fdig,r6
+	movl	v_precision,r7
+	jsb	s_repr
+	movl	r0,r8
+	tstl	r1
+	beql	10$
+	movl	#^a/-/,r0
+	jsb	s_emit
+10$:	rsb
+
+s_fexp:	pushl	r0
+	movl	#^a/E/,r0
+	jsb	s_emit
+	movl	(sp)+,r0
+	bgeq	10$
+	pushl	r0
+	movl	#^a/-/,r0
+	jsb	s_emit
+	mnegl	(sp)+,r0
+10$:	brw	s_emitdec
+
+s_fzeros:
+	movl	r0,-(sp)
+10$:	tstl	(sp)
+	bleq	20$
+	movl	#^a/0/,r0
+	jsb	s_emit
+	decl	(sp)
+	brb	10$
+20$:	tstl	(sp)+
+	rsb
+
+;+++
+;f> FS. -- ( F: r -- ) show r as d.dddEn.
+;---
+	defword	fsdot,^~FS.~
+	jsb	s_fdigits
+	movzbl	v_fdig,r0
+	jsb	s_emit
+	movl	#^a/./,r0
+	jsb	s_emit
+	moval	v_fdig+1,r6
+	subl3	#1,v_precision,r7
+	jsb	s_typer6
+	subl3	#1,r8,r0
+	jsb	s_fexp
+	brw	space
+
+;+++
+;f> FE. -- ( F: r -- ) show r as ddd.dddEn, n a multiple of 3.
+;---
+	defword	fedot,^~FE.~
+	jsb	s_fdigits
+	addl3	#2999,r8,r0		; (n-1) mod 3, for any n
+	clrl	r1
+	ediv	#3,r0,r0,r7
+	incl	r7			; digits before the point
+	subl2	r7,r8			; the exponent
+	clrl	r6
+10$:	cmpl	r6,r7
+	bgeq	20$
+	movl	#^a/0/,r0		; (if PRECISION is short)
+	cmpl	r6,v_precision
+	bgeq	15$
+	movzbl	v_fdig[r6],r0
+15$:	jsb	s_emit
+	incl	r6
+	brb	10$
+20$:	movl	#^a/./,r0
+	jsb	s_emit
+	subl3	r7,v_precision,r0	; the rest
+	movab	v_fdig[r7],r6
+	movl	r0,r7
+	jsb	s_typer6
+	movl	r8,r0
+	jsb	s_fexp
+	brw	space
+
+;+++
+;f> F. -- ( F: r -- ) show r as ddd.ddd, without trailing zeros.
+;---
+	defword	fdot,^~F.~
+	jsb	s_fdigits
+	movl	v_precision,r7		; drop the trailing zeros
+10$:	cmpl	r7,#1
+	bleq	15$
+	cmpb	v_fdig-1[r7],#^a/0/
+	bneq	15$
+	decl	r7
+	brb	10$
+15$:	tstl	r8
+	bgtr	30$
+	movl	#^a/0/,r0		; 0.000ddd
+	jsb	s_emit
+	movl	#^a/./,r0
+	jsb	s_emit
+	mnegl	r8,r0
+	jsb	s_fzeros
+	moval	v_fdig,r6
+	jsb	s_typer6
+	brw	space
+30$:	cmpl	r8,r7			; ddd000.
+	blss	40$
+	pushl	r7
+	moval	v_fdig,r6
+	jsb	s_typer6
+	subl3	(sp)+,r8,r0
+	jsb	s_fzeros
+	movl	#^a/./,r0
+	jsb	s_emit
+	brw	space
+40$:	pushl	r7			; ddd.ddd
+	moval	v_fdig,r6
+	movl	r8,r7
+	jsb	s_typer6
+	movl	#^a/./,r0
+	jsb	s_emit
+	movab	v_fdig[r8],r6
+	subl3	r8,(sp)+,r7
+	jsb	s_typer6
+	brw	space
+
+;+++
+;e> MAX-FLOAT -- ( F: -- r ) the largest float.
+;---
+	defword	e_maxfloat,^~MAX-FLOAT~,wl=env
+	movq	g_maxfloat,-(r9)
+	rsb

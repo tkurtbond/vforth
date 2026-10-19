@@ -1,0 +1,1286 @@
+	newpage	<The Compiler>
+;******************************************************************************
+;
+; VFCOMP.MAR -- the compiler: COMPILE, and literals, the defining words,
+; control structures, strings and conditional compilation.
+;
+; Compiled code for the control structures, with orig and dest the
+; addresses the control-flow stack holds:
+;	IF	tstl (r11)+ / bneq .+6 / jmp @#orig	(orig: the address
+;							field of the JMP)
+;	AHEAD	jmp @#orig
+;	AGAIN	jmp @#dest
+;	UNTIL	tstl (r11)+ / bneq .+6 / jmp @#dest
+;	DO	jsb @#do_do			then dest
+;	?DO	jsb @#do_qdo / bneq .+6 / jmp @#leave	then dest
+;	LOOP	incl (sp) / bvs .+6 / jmp @#dest / addl2 #8,sp
+;	+LOOP	addl2 (r11)+,(sp) / bvs .+6 / jmp @#dest / addl2 #8,sp
+;	LEAVE	addl2 #8,sp / jmp @#leave
+;	OF	cmpl (r11)+,(r11) / beql .+6 / jmp @#orig / addl2 #4,r11
+; A JMP whose target is not known yet holds the link to the previous one
+; in the same chain (the LEAVEs of a loop), and is filled in later.
+;
+;******************************************************************************
+	.psect	vf_code
+
+	newpage	<Compiling Code>
+;+++
+;s> s_lit_r0 -- compile code to push the literal r0.  Uses r0-r2.
+;---
+s_lit_r0:
+	movl	r0,r2
+	cmpl	r2,#63			; 0-63: a short literal
+	bgtru	20$
+	movl	#op_movl,r0
+	jsb	s_cb
+	movl	r2,r0
+	jsb	s_cb
+	brb	40$
+20$:	mnegl	r2,r0			; -1 to -63: MNEGL of a short literal
+	cmpl	r0,#63
+	bgtru	30$
+	movl	r0,r2
+	movl	#op_mnegl,r0
+	jsb	s_cb
+	movl	r2,r0
+	jsb	s_cb
+	brb	40$
+30$:	movzwl	#op_movl!<adm_imm@8>,r0	; MOVL #long
+	jsb	s_cw
+	movl	r2,r0
+	jsb	s_cl
+40$:	movl	#adm_adec_r11,r0	; ,-(r11)
+	brw	s_cb
+
+;+++
+;c> LITERAL -- compilation: ( x -- ) run time: ( -- x )
+;---
+	defword	literal,^~LITERAL~,f_imm!f_conly
+	movl	(r11)+,r0
+	brb	s_lit_r0
+
+;+++
+;d> 2LITERAL -- compilation: ( x1 x2 -- ) run time: ( -- x1 x2 )
+;---
+	defword	twoliteral,^~2LITERAL~,f_imm!f_conly
+	movl	4(r11),r0
+	jsb	s_lit_r0
+	movl	(r11),r0
+	jsb	s_lit_r0
+	addl2	#8,r11
+	rsb
+
+;+++
+;c> COMPILE, -- ( xt -- ) append the execution semantics of xt.
+;---
+	defword	compilecomma,^~COMPILE,~
+	movl	(r11)+,r0
+;+++
+;s> s_compile_r0 -- compile the xt in r0: copy its inline code, or
+;	compile the value of a constant or the address of a variable as a
+;	literal, or a value as a fetch, or else a JSB to it.  Uses r0-r3.
+;---
+s_compile_r0:
+	movzbl	-1(r0),r2		; flags
+	bicl3	#^c<m_inlen>,r2,r3	; inline length
+	beql	50$
+	bbc	#5,r2,10$		; f_alt?
+	addl2	#2,r0			; the inline code is after a BRB
+10$:	movl	v_dp,r1			; copy the inline code
+20$:	movb	(r0)+,(r1)+
+	sobgtr	r3,20$
+	movl	r1,v_dp
+	rsb
+50$:	cmpw	(r0),#op_jsb!<adm_abs@8> ; JSB @#?
+	bneq	90$
+	movl	2(r0),r1		; to what?
+	cmpl	r1,#do_const
+	bneq	60$
+	movl	6(r0),r0		; a constant: its value
+	brw	s_lit_r0
+60$:	cmpl	r1,#do_create
+	bneq	70$
+	addl2	#6,r0			; a variable: its address
+	brw	s_lit_r0
+70$:	cmpl	r1,#do_value
+	bneq	90$
+	addl3	#6,r0,r2		; a value: MOVL @#body,-(r11)
+	movzwl	#op_movl!<adm_abs@8>,r0
+	jsb	s_cw
+	movl	r2,r0
+	jsb	s_cl
+	movl	#adm_adec_r11,r0
+	brw	s_cb
+90$:	brw	s_cjsb
+
+;+++
+;s> s_cjmpchain -- compile JMP @#r2 and return in r2 the address of its
+;	address field.  Uses r0-r2.
+;---
+s_cjmpchain:
+	movl	r2,r0
+	jsb	s_cjmp
+	subl3	#4,v_dp,r2
+	rsb
+
+	newpage	<Headers and Definitions>
+;+++
+;s> s_header -- make a header for the name r6, r7 in the compilation
+;	word list, placed so the xt + 6 is cell aligned.  The new word is
+;	the latest; r8 = its nt.  Uses r0-r5.
+;---
+s_header:
+	tstl	r7
+	bneq	5$
+	throw	t_noname
+5$:	cmpl	r7,#c_maxname
+	blequ	7$
+	throw	t_longname
+7$:	movl	v_dp,r1
+10$:	addl3	r1,r7,r0		; pad until nt + len is aligned
+	bitl	#3,r0
+	beql	20$
+	clrb	(r1)+
+	brb	10$
+20$:	movl	r1,r8			; nt
+	movl	@v_current,(r1)+	; link
+	movb	r7,(r1)+		; length
+	movc3	r7,(r6),(r1)		; name (r3 after it)
+	clrb	(r3)+			; flags
+	movl	r3,v_dp
+	movl	r3,v_latestxt
+	movl	r8,v_latest
+	movl	r8,@v_current		; link it in
+	brw	s_checkdict
+
+;+++
+;s> s_parsehdr -- parse a name and make a header for it.
+;---
+s_parsehdr:
+	jsb	parsename
+	movl	(r11)+,r7
+	movl	(r11)+,r6
+	brb	s_header
+
+;+++
+;s> s_probe -- compile TSTL -c_probe(SP), which reads below the return
+;	stack so a definition recursing too deeply hits the guard pages
+;	while there is still room on the stack for the exception.
+;---
+s_probe:
+	movzwl	#op_tstl!<adm_wdisp_sp@8>,r0
+	jsb	s_cw
+	movl	#-c_probe,r0
+	brw	s_cw
+
+;+++
+;c> : -- ( "name" -- colon-sys )
+;---
+	defword	colon,^~:~
+	movl	v_dp,v_defstart
+	movl	v_latest,v_deflatest
+	jsb	s_parsehdr
+	bisb2	#h_hidden,4(r8)		; not found until ;
+	movl	r8,v_reveal
+r_startdef:
+	mnegl	#1,v_state
+	clrl	v_nlocals
+	clrl	v_localsz
+	clrl	v_npend
+	clrl	v_ninit
+	movl	r11,v_csp
+	brb	s_probe
+
+;+++
+;c> :NONAME -- ( -- xt colon-sys )
+;---
+	defword	noname,^~:NONAME~
+	movl	v_dp,v_defstart
+	movl	v_latest,v_deflatest
+	clrl	v_reveal
+	movl	v_dp,r1			; flags byte, then the xt
+	clrb	(r1)+
+	movl	r1,v_dp
+	movl	r1,v_latestxt
+	movl	r1,-(r11)
+	brb	r_startdef
+
+;+++
+;s> s_exitcode -- compile the end of a definition: put back the caller's
+;	locals frame if this definition has locals, then RSB.
+;---
+s_exitcode:
+	jsb	s_unframe
+	movl	#op_rsb,r0
+	brw	s_cb
+
+s_unframe:
+	tstl	v_nlocals
+	beql	10$
+	movl	#op_movl!<adm_r10@8>!<adm_sp@16>,r0	; MOVL R10,SP
+	jsb	s_cl
+	decl	v_dp
+	movl	#op_movl!<adm_ainc_sp@8>!<adm_r10@16>,r0 ; MOVL (SP)+,R10
+	jsb	s_cl
+	decl	v_dp
+10$:	rsb
+
+;+++
+;c> ; -- ( colon-sys -- )
+;---
+	defword	semicolon,^~;~,f_imm!f_conly
+	cmpl	r11,v_csp		; control structures balanced?
+	beql	10$
+	throw	t_ctlmismatch
+10$:	jsb	s_exitcode
+	movl	v_reveal,r0		; make it findable
+	beql	20$
+	bicb2	#h_hidden,4(r0)
+20$:	clrl	v_reveal
+	clrl	v_state
+	clrl	v_nlocals
+	clrl	v_defstart
+	rsb
+
+;+++
+;c> EXIT -- ( -- ) ( R: nest-sys -- )
+;---
+	defword	exit,^~EXIT~,f_imm!f_conly
+	brw	s_exitcode
+
+;+++
+;c> RECURSE -- ( -- )
+;---
+	defword	recurse,^~RECURSE~,f_imm!f_conly
+	movl	v_latestxt,r0
+	brw	s_cjsb
+
+;+++
+;c> [ -- ( -- )  ] -- ( -- )
+;---
+	defword	lbracket,^~[~,f_imm
+	clrl	v_state
+	rsb
+
+	defword	rbracket,^~]~
+	mnegl	#1,v_state
+	rsb
+
+;+++
+;c> IMMEDIATE -- ( -- )
+;---
+	defword	immediate,^~IMMEDIATE~
+	movl	v_latestxt,r0
+	bisb2	#f_imm,-1(r0)
+	rsb
+
+;+++
+;v> COMPILE-ONLY -- ( -- ) make the latest word compile only.
+;---
+	defword	componly,^~COMPILE-ONLY~
+	movl	v_latestxt,r0
+	bisb2	#f_conly,-1(r0)
+	rsb
+
+	newpage	<Defining Words>
+;+++
+;s> do_create -- run time of a CREATEd word: push its data field.
+;	do_const, do_value -- of a CONSTANT and a VALUE.
+;	do_2const, do_2value -- of a 2CONSTANT and a 2VALUE.
+;	do_field -- of a +FIELD.
+;---
+do_create:
+	movl	(sp)+,-(r11)
+	rsb
+do_const:
+	movl	@(sp)+,-(r11)
+	rsb
+do_value:
+	movl	@(sp)+,-(r11)
+	rsb
+do_2const:
+	movl	(sp)+,r0
+	movq	(r0),-(r11)
+	rsb
+do_2value:
+	movl	(sp)+,r0
+	movq	(r0),-(r11)
+	rsb
+do_field:
+	addl2	@(sp)+,(r11)
+	rsb
+
+;
+; do_value is separate from do_const, the same code, so COMPILE, can tell
+; them apart: a constant's value is compiled as a literal, a value's is
+; fetched.
+;
+
+;+++
+;c> CREATE -- ( "name" -- )
+;---
+	defword	create,^~CREATE~
+	jsb	s_parsehdr
+	movl	#do_create,r0
+	brw	s_cjsb
+
+;+++
+;c> >BODY -- ( xt -- a-addr )
+;---
+	defword	tobody,^~>BODY~,inl=1
+	addl2	#6,(r11)
+tobody_e: rsb
+
+;+++
+;s> do_does -- run time of DOES>: make the latest word run the code
+;	after this JSB, and return from the defining word.
+;---
+do_does:
+	movl	v_latestxt,r1
+	movl	(sp)+,2(r1)
+	rsb
+
+;+++
+;c> DOES> -- ( colon-sys1 -- colon-sys2 )
+;---
+	defword	does,^~DOES>~,f_imm!f_conly
+	jsb	s_unframe
+	clrl	v_nlocals		; the DOES> part has its own locals
+	clrl	v_localsz
+	clrl	v_npend
+	clrl	v_ninit
+	movl	#do_does,r0
+	jsb	s_cjsb
+	movl	#op_movl!<adm_ainc_sp@8>!<adm_adec_r11@16>,r0
+	jsb	s_cl			; MOVL (SP)+,-(R11)
+	decl	v_dp
+	brw	s_probe
+
+;+++
+;c> VARIABLE -- ( "name" -- )
+;---
+	defword	variable,^~VARIABLE~
+	jsb	create
+	clrl	r0
+	brw	s_cl
+
+;+++
+;d> 2VARIABLE -- ( "name" -- )
+;---
+	defword	twovariable,^~2VARIABLE~
+	jsb	create
+	clrl	r0
+	jsb	s_cl
+	clrl	r0
+	brw	s_cl
+
+;+++
+;c> CONSTANT -- ( x "name" -- )
+;---
+	defword	constant,^~CONSTANT~
+	movl	#do_const,r2
+r_constant:
+	pushl	r2
+	jsb	s_parsehdr
+	movl	(sp)+,r0
+	jsb	s_cjsb
+	movl	(r11)+,r0
+	brw	s_cl
+
+;+++
+;c> VALUE -- ( x "name" -- )
+;---
+	defword	value,^~VALUE~
+	movl	#do_value,r2
+	brb	r_constant
+
+;+++
+;d> 2CONSTANT -- ( x1 x2 "name" -- )
+;---
+	defword	twoconstant,^~2CONSTANT~
+	movl	#do_2const,r2
+r_2constant:
+	pushl	r2
+	jsb	s_parsehdr
+	movl	(sp)+,r0
+	jsb	s_cjsb
+	movl	(r11)+,r0
+	jsb	s_cl
+	movl	(r11)+,r0
+	brw	s_cl
+
+;+++
+;d> 2VALUE -- ( x1 x2 "name" -- )
+;---
+	defword	twovalue,^~2VALUE~
+	movl	#do_2value,r2
+	brb	r_2constant
+
+;+++
+;c> BUFFER: -- ( u "name" -- )
+;---
+	defword	bufferc,^~BUFFER:~
+	jsb	create
+	brw	allot
+
+;+++
+;c> TO -- ( i*x "name" -- ) store into a VALUE, 2VALUE, FVALUE or local.
+;---
+	defword	to,^~TO~,f_imm
+	jsb	parsename
+	movl	(r11)+,r7
+	movl	(r11)+,r6
+	movl	r6,v_errname
+	movl	r7,v_errname+4
+	tstl	v_state
+	beql	10$
+	tstl	v_nlocals
+	beql	10$
+	jsb	s_findlocal		; a local?
+	tstl	r0
+	beql	10$
+	brw	s_complocalto
+10$:	jsb	s_find
+	bneq	15$
+	throw	t_undef
+15$:	jsb	s_ntxt
+	cmpw	(r1),#op_jsb!<adm_abs@8>
+	bneq	90$
+	addl3	#6,r1,r2		; the body
+	movl	2(r1),r0		; the kind of word
+	cmpl	r0,#do_value
+	bneq	20$
+	movzwl	#op_movl!<adm_ainc_r11@8>,r3 ; MOVL (R11)+,@#body
+	tstl	v_state
+	bneq	50$
+	movl	(r11)+,(r2)
+	rsb
+20$:	cmpl	r0,#do_2value
+	bneq	30$
+	movzwl	#op_movq!<adm_ainc_r11@8>,r3 ; MOVQ (R11)+,@#body
+	tstl	v_state
+	bneq	50$
+	movq	(r11)+,(r2)
+	rsb
+30$:	cmpl	r0,#do_fvalue
+	bneq	90$
+	movzwl	#op_movq!<adm_ainc_r9@8>,r3 ; MOVQ (R9)+,@#body
+	tstl	v_state
+	bneq	50$
+	movq	(r9)+,(r2)
+	rsb
+50$:	movl	r3,r0			; compile the store
+	jsb	s_cw
+	movl	#adm_abs,r0
+	jsb	s_cb
+	movl	r2,r0
+	brw	s_cl
+90$:	throw	t_badname
+
+;+++
+;c> DEFER -- ( "name" -- ) its code is JMP @#xt.
+;---
+	defword	defer,^~DEFER~
+	jsb	s_parsehdr
+	movl	#do_undefer,r0
+	brw	s_cjmp
+
+do_undefer:
+	throw	t_unsup
+
+;+++
+;c> DEFER! -- ( xt2 xt1 -- )
+;---
+	defword	deferstore,^~DEFER!~
+	movl	(r11)+,r0
+	movl	(r11)+,2(r0)
+	rsb
+
+;+++
+;c> DEFER@ -- ( xt1 -- xt2 )
+;---
+	defword	deferfetch,^~DEFER@~
+	movl	(r11),r0
+	movl	2(r0),(r11)
+	rsb
+
+;+++
+;c> IS -- ( xt "name" -- )
+;---
+	defword	is,^~IS~,f_imm
+	jsb	s_findname
+	tstl	v_state
+	bneq	10$
+	movl	r1,-(r11)
+	brb	deferstore
+10$:	movl	r1,r0
+	jsb	s_lit_r0
+	movl	#deferstore,r0
+	brw	s_cjsb
+
+;+++
+;c> ACTION-OF -- ( "name" -- xt )
+;---
+	defword	actionof,^~ACTION-OF~,f_imm
+	jsb	s_findname
+	tstl	v_state
+	bneq	10$
+	movl	2(r1),-(r11)
+	rsb
+10$:	movl	r1,r0
+	jsb	s_lit_r0
+	movl	#deferfetch,r0
+	brw	s_cjsb
+
+;+++
+;t> SYNONYM -- ( "newname" "oldname" -- )
+;---
+	defword	synonym,^~SYNONYM~
+	jsb	s_parsehdr
+	movl	r8,-(sp)
+	jsb	s_findname
+	movl	(sp)+,r8
+	movl	v_latestxt,r2		; same IMMEDIATE and compile only
+	bicb3	#^c<f_imm!f_conly>,-1(r1),-1(r2)
+	movl	r1,r0
+	brw	s_cjmp
+
+;+++
+;c> MARKER -- ( "name" -- ) the word restores HERE, the word lists and
+;	the search order to what they were before it was made.  Its data:
+;	HERE, v_wlchain, v_current, v_norder, v_order (c_maxorder cells),
+;	then (wid, latest nt) pairs ending with 0.
+;---
+	defword	marker,^~MARKER~
+	movl	v_dp,-(sp)
+	jsb	s_parsehdr
+	movl	#do_marker,r0
+	jsb	s_cjsb
+	movl	(sp)+,r0		; HERE
+	jsb	s_cl
+	movl	v_wlchain,r0
+	jsb	s_cl
+	movl	v_current,r0
+	jsb	s_cl
+	movl	v_norder,r0
+	jsb	s_cl
+	clrl	r4
+10$:	movl	v_order[r4],r0
+	jsb	s_cl
+	aoblss	#c_maxorder,r4,10$
+	movl	v_wlchain,r4		; every word list's latest word
+20$:	movl	r4,r0
+	jsb	s_cl
+	movl	(r4),r0
+	cmpl	r4,v_current		; the marker itself is not kept
+	bneq	25$
+	movl	(r0),r0
+25$:	jsb	s_cl
+	movl	4(r4),r4
+	bneq	20$
+	clrl	r0
+	brw	s_cl
+
+do_marker:
+	movl	(sp)+,r1
+	movl	(r1)+,v_dp
+	movl	(r1)+,v_wlchain
+	movl	(r1)+,v_current
+	movl	(r1)+,v_norder
+	clrl	r4
+10$:	movl	(r1)+,v_order[r4]
+	aoblss	#c_maxorder,r4,10$
+20$:	movl	(r1)+,r4
+	beql	30$
+	movl	(r1)+,(r4)
+	brb	20$
+30$:	movl	v_latest,r0		; latest may be gone
+	cmpl	r0,v_dp
+	blssu	40$
+	movl	@v_current,v_latest
+40$:	rsb
+
+	newpage	<Compiling Words>
+;+++
+;c> ['] -- compilation: ( "name" -- ) run time: ( -- xt )
+;---
+	defword	brackettick,^~[']~,f_imm!f_conly
+	jsb	s_findname
+	movl	r1,r0
+	brw	s_lit_r0
+
+;+++
+;c> POSTPONE -- ( "name" -- )
+;---
+	defword	postpone,^~POSTPONE~,f_imm!f_conly
+	jsb	s_findname
+	movl	r1,r0
+	bitb	#f_imm,-1(r1)		; immediate?
+	beql	10$
+	brw	s_compile_r0		; yes, compile it
+10$:	jsb	s_lit_r0		; no, compile code to compile it
+	movl	#compilecomma,r0
+	brw	s_cjsb
+
+;+++
+;c> [COMPILE] -- ( "name" -- )
+;---
+	defword	bracketcompile,^~[COMPILE]~,f_imm!f_conly
+	jsb	s_findname
+	movl	r1,r0
+	brw	s_compile_r0
+
+	newpage	<Control Structures>
+;+++
+;s> s_cif -- compile TSTL (R11)+ / BNEQ .+6 / JMP @#r2, leaving the
+;	address of the JMP's address field in r2.
+;---
+s_cif:	movzwl	#op_tstl!<adm_ainc_r11@8>,r0
+	jsb	s_cw
+	movzwl	#op_bneq!<6@8>,r0
+	jsb	s_cw
+	brw	s_cjmpchain
+
+;+++
+;c> IF -- ( -- orig )
+;---
+	defword	if,^~IF~,f_imm!f_conly
+	clrl	r2
+	jsb	s_cif
+	movl	r2,-(r11)
+	rsb
+
+;+++
+;c> THEN -- ( orig -- )
+;---
+	defword	then,^~THEN~,f_imm!f_conly
+	movl	v_dp,@(r11)+
+	rsb
+
+;+++
+;c> ELSE -- ( orig1 -- orig2 )
+;---
+	defword	else,^~ELSE~,f_imm!f_conly
+	clrl	r2
+	jsb	s_cjmpchain
+	movl	v_dp,@(r11)
+	movl	r2,(r11)
+	rsb
+
+;+++
+;t> AHEAD -- ( -- orig )
+;---
+	defword	ahead,^~AHEAD~,f_imm!f_conly
+	clrl	r2
+	jsb	s_cjmpchain
+	movl	r2,-(r11)
+	rsb
+
+;+++
+;c> BEGIN -- ( -- dest )
+;---
+	defword	begin,^~BEGIN~,f_imm!f_conly
+	movl	v_dp,-(r11)
+	rsb
+
+;+++
+;c> AGAIN -- ( dest -- )
+;---
+	defword	again,^~AGAIN~,f_imm!f_conly
+	movl	(r11)+,r0
+	brw	s_cjmp
+
+;+++
+;c> UNTIL -- ( dest -- )
+;---
+	defword	until,^~UNTIL~,f_imm!f_conly
+	movl	(r11)+,r2
+	brw	s_cif
+
+;+++
+;c> WHILE -- ( dest -- orig dest )
+;---
+	defword	while,^~WHILE~,f_imm!f_conly
+	clrl	r2
+	jsb	s_cif
+	movl	(r11),-(r11)
+	movl	r2,4(r11)
+	rsb
+
+;+++
+;c> REPEAT -- ( orig dest -- )
+;---
+	defword	repeat,^~REPEAT~,f_imm!f_conly
+	jsb	again
+	brw	then
+
+;+++
+;t> CS-PICK -- ( C: destu ... orig0|dest0 -- ... ) ( S: u -- )
+;t> CS-ROLL
+;---
+	defword	cspick,^~CS-PICK~,f_conly
+	brw	pick
+
+	defword	csroll,^~CS-ROLL~,f_conly
+	brw	roll
+
+;+++
+;s> do_do -- run time of DO: ( n1 n2 -- ) ( R: -- loop-sys )
+;	pushes limit + 2**31 and index - (limit + 2**31).
+;---
+do_do:	movl	(sp)+,r2
+	movl	(r11)+,r0		; index
+	movl	(r11)+,r1		; limit
+	xorl2	#^x80000000,r1
+	pushl	r1
+	subl3	r1,r0,-(sp)
+	jmp	(r2)
+
+;+++
+;s> do_qdo -- run time of ?DO: like DO, but if they are equal drop them
+;	and return with Z set.
+;---
+do_qdo:	movl	(sp)+,r2
+	movl	(r11)+,r0
+	movl	(r11)+,r1
+	cmpl	r0,r1
+	bneq	10$
+	jmp	(r2)			; Z set: skip the loop
+10$:	xorl2	#^x80000000,r1
+	pushl	r1
+	subl3	r1,r0,-(sp)
+	bicpsw	#4			; Z clear: run the loop
+	jmp	(r2)
+
+;+++
+;c> DO -- ( -- do-sys ) do-sys is ( leave-chain dest ).
+;---
+	defword	do,^~DO~,f_imm!f_conly
+	movl	#do_do,r0
+	jsb	s_cjsb
+	movl	v_leave,-(r11)
+	clrl	v_leave
+	movl	v_dp,-(r11)
+	rsb
+
+;+++
+;c> ?DO -- ( -- do-sys )
+;---
+	defword	qdo,^~?DO~,f_imm!f_conly
+	movl	#do_qdo,r0
+	jsb	s_cjsb
+	movl	v_leave,-(r11)
+	movzwl	#op_bneq!<6@8>,r0
+	jsb	s_cw
+	clrl	r2
+	jsb	s_cjmpchain
+	movl	r2,v_leave
+	movl	v_dp,-(r11)
+	rsb
+
+;+++
+;s> s_endloop -- finish LOOP or +LOOP: BVS .+6 / JMP @#dest / ADDL2 #8,SP,
+;	then resolve the LEAVEs.
+;---
+s_endloop:
+	movzwl	#op_bvs!<6@8>,r0
+	jsb	s_cw
+	movl	(r11)+,r0		; dest
+	jsb	s_cjmp
+	movl	#op_addl2!<8@8>!<adm_sp@16>,r0 ; ADDL2 #8,SP
+	jsb	s_cl
+	decl	v_dp
+	movl	v_leave,r1		; resolve the chain
+10$:	beql	20$
+	movl	(r1),r2
+	movl	v_dp,(r1)
+	movl	r2,r1
+	brb	10$
+20$:	movl	(r11)+,v_leave
+	rsb
+
+;+++
+;c> LOOP -- ( do-sys -- )
+;---
+	defword	loop,^~LOOP~,f_imm!f_conly
+	movzwl	#op_incl!<adm_def_sp@8>,r0	; INCL (SP)
+	jsb	s_cw
+	brb	s_endloop
+
+;+++
+;c> +LOOP -- ( do-sys -- )
+;---
+	defword	plusloop,^~+LOOP~,f_imm!f_conly
+	movl	#op_addl2!<adm_ainc_r11@8>!<adm_def_sp@16>,r0
+	jsb	s_cl			; ADDL2 (R11)+,(SP)
+	decl	v_dp
+	brb	s_endloop
+
+;+++
+;c> LEAVE -- ( -- ) ( R: loop-sys -- )
+;---
+	defword	leave,^~LEAVE~,f_imm!f_conly
+	movl	#op_addl2!<8@8>!<adm_sp@16>,r0
+	jsb	s_cl
+	decl	v_dp
+	movl	v_leave,r2
+	jsb	s_cjmpchain
+	movl	r2,v_leave
+	rsb
+
+;+++
+;c> CASE -- ( -- case-sys )
+;---
+	defword	case,^~CASE~,f_imm!f_conly
+	clrl	-(r11)
+	rsb
+
+;+++
+;c> OF -- ( -- of-sys )
+;---
+	defword	of,^~OF~,f_imm!f_conly
+	movl	#op_cmpl!<adm_ainc_r11@8>!<adm_def_r11@16>,r0
+	jsb	s_cl			; CMPL (R11)+,(R11)
+	decl	v_dp
+	movzwl	#op_beql!<6@8>,r0
+	jsb	s_cw
+	clrl	r2
+	jsb	s_cjmpchain
+	movl	r2,-(r11)
+	movl	#op_addl2!<4@8>!<adm_r11@16>,r0 ; ADDL2 #4,R11
+	jsb	s_cl
+	decl	v_dp
+	rsb
+
+;+++
+;c> ENDOF -- ( case-sys of-sys -- case-sys )
+;---
+	defword	endof,^~ENDOF~,f_imm!f_conly
+	clrl	r2
+	jsb	s_cjmpchain
+	movl	v_dp,@(r11)
+	movl	r2,(r11)
+	rsb
+
+;+++
+;c> ENDCASE -- ( case-sys -- )
+;---
+	defword	endcase,^~ENDCASE~,f_imm!f_conly
+	movl	#op_addl2!<4@8>!<adm_r11@16>,r0
+	jsb	s_cl
+	decl	v_dp
+10$:	movl	(r11)+,r1
+	beql	20$
+	movl	v_dp,(r1)
+	brb	10$
+20$:	rsb
+
+	newpage	<Strings>
+;+++
+;s> s_sbuf -- copy the string r6, r7 into the next transient S" buffer,
+;	leaving r6 its new address.
+;---
+s_sbuf:	cmpl	r7,#c_sbufsize
+	blequ	10$
+	movl	#c_sbufsize,r7
+10$:	movl	v_sbufnext,r0
+	incl	v_sbufnext
+	cmpl	v_sbufnext,#c_nsbufs
+	blss	20$
+	clrl	v_sbufnext
+20$:	mull2	#c_sbufsize,r0
+	movab	v_sbufs,r8
+	addl2	r0,r8
+	pushl	r7
+	movc3	r7,(r6),(r8)
+	movl	(sp)+,r7
+	movl	r8,r6
+	rsb
+
+;+++
+;s> do_slit -- run time of a compiled string: ( -- c-addr u ), followed by
+;	the length (a longword) and the characters.
+;---
+do_slit:
+	movl	(sp),r0
+	movl	(r0)+,r1
+	movl	r0,-(r11)
+	movl	r1,-(r11)
+	addl3	r0,r1,(sp)
+	rsb
+
+;+++
+;s> do_clit -- run time of C": ( -- c-addr ), followed by the counted
+;	string.
+;---
+do_clit:
+	movl	(sp),r0
+	movl	r0,-(r11)
+	movzbl	(r0),r1
+	incl	r1
+	addl2	r1,(sp)
+	rsb
+
+;+++
+;s> s_cslit -- compile the string r6, r7 as JSB @#do_slit and its text.
+;---
+s_cslit:
+	movl	#do_slit,r0
+	jsb	s_cjsb
+	movl	r7,r0
+	jsb	s_cl
+	movl	v_dp,r8
+	addl2	r7,v_dp
+	movc3	r7,(r6),(r8)
+	brw	s_checkdict
+
+;+++
+;s> s_cclit -- compile the counted string r6, r7 after the run time r2.
+;---
+s_cclit:
+	movl	r2,r0
+	jsb	s_cjsb
+	cmpl	r7,#255
+	blequ	10$
+	throw	t_parseover
+10$:	movl	r7,r0
+	jsb	s_cb
+	movl	v_dp,r8
+	addl2	r7,v_dp
+	movc3	r7,(r6),(r8)
+	rsb
+
+;+++
+;s> s_parsequote -- parse a string ending with ".  r6, r7 = the string.
+;---
+s_parsequote:
+	movl	#^a/"/,-(r11)
+	jsb	parse
+	movl	(r11)+,r7
+	movl	(r11)+,r6
+	rsb
+
+;+++
+;c> S" -- ( "ccc<quote>" -- c-addr u )
+;---
+	defword	squote,^~S"~,f_imm
+	jsb	s_parsequote
+r_sstring:
+	tstl	v_state
+	beql	10$
+	brw	s_cslit
+10$:	jsb	s_sbuf
+	movl	r6,-(r11)
+	movl	r7,-(r11)
+	rsb
+
+;+++
+;c> S\" -- ( "ccc<quote>" -- c-addr u ) with escapes.
+;---
+	defword	sbackquote,^~S\"~,f_imm
+	jsb	s_parseescaped
+	brb	r_sstring
+
+;+++
+;c> C" -- ( "ccc<quote>" -- c-addr )
+;---
+	defword	cquote,^~C"~,f_imm!f_conly
+	jsb	s_parsequote
+	movl	#do_clit,r2
+	brw	s_cclit
+
+;+++
+;c> ." -- ( "ccc<quote>" -- )
+;---
+	defword	dotquote,^~."~,f_imm
+	jsb	s_parsequote
+	tstl	v_state
+	bneq	10$
+	brw	s_typer6
+10$:	jsb	s_cslit
+	movl	#type,r0
+	brw	s_cjsb
+
+;+++
+;c> ABORT" -- ( "ccc<quote>" -- ) run time: ( i*x x1 -- | i*x )
+;---
+	defword	abortquote,^~ABORT"~,f_imm!f_conly
+	jsb	s_parsequote
+	movl	#do_aborts,r2
+	brw	s_cclit
+
+;+++
+;s> SLITERAL -- compilation: ( c-addr u -- ) run time: ( -- c-addr u )
+;---
+	defword	sliteral,^~SLITERAL~,f_imm!f_conly
+	movl	(r11)+,r7
+	movl	(r11)+,r6
+	brw	s_cslit
+
+;+++
+;c> CHAR -- ( "name" -- char )
+;---
+	defword	char,^~CHAR~
+	jsb	parsename
+	movl	(r11)+,r7
+	movzbl	@(r11),(r11)
+	rsb
+
+;+++
+;c> [CHAR] -- compilation: ( "name" -- ) run time: ( -- char )
+;---
+	defword	bracketchar,^~[CHAR]~,f_imm!f_conly
+	jsb	char
+	movl	(r11)+,r0
+	brw	s_lit_r0
+
+;+++
+;s> s_parseescaped -- parse a string ending with " that may contain \
+;	escapes, translating it into v_xbuf.  r6, r7 = the result.
+;---
+s_parseescaped:
+	addl3	v_srcaddr,v_toin,r1	; source
+	subl3	v_toin,v_srclen,r2	; characters left
+	moval	v_xbuf,r3		; result
+10$:	tstl	r2
+	bgtr	11$
+	brw	90$
+11$:	movzbl	(r1)+,r0
+	decl	r2
+	cmpb	r0,#^a/"/		; the end?
+	bneq	12$
+	brw	90$
+12$:	cmpb	r0,#^a/\/
+	beql	20$
+15$:	movb	r0,(r3)+
+	brb	10$
+20$:	tstl	r2
+	bleq	90$
+	movzbl	(r1)+,r0
+	decl	r2
+	moval	v_escapes,r4		; look up the simple ones
+25$:	tstb	(r4)
+	beql	30$
+	cmpb	r0,(r4)+
+	beql	27$
+	incl	r4
+	brb	25$
+27$:	movb	(r4),r0
+	brb	15$
+30$:	cmpb	r0,#^a/m/		; \m is CR LF
+	bneq	40$
+	movb	#13,(r3)+
+	movb	#10,r0
+	brb	15$
+40$:	cmpb	r0,#^a/x/		; \x and two hex digits
+	bneq	15$			; anything else stands for itself
+	clrl	r5
+	movl	#2,r4
+45$:	tstl	r2
+	bleq	48$
+	movzbl	(r1),r0
+	pushl	r0
+	jsb	s_digval
+	cmpl	r0,#16
+	bgequ	47$
+	tstl	(sp)+
+	ashl	#4,r5,r5
+	addl2	r0,r5
+	incl	r1
+	decl	r2
+	sobgtr	r4,45$
+	brb	48$
+47$:	tstl	(sp)+
+48$:	movl	r5,r0
+	brb	15$
+90$:	subl3	v_srcaddr,r1,v_toin
+	moval	v_xbuf,r6
+	subl3	r6,r3,r7
+	rsb
+
+v_escapes:
+	.ascii	/a/<7>/b/<8>/e/<27>/f/<12>/l/<10>/n/<10>/q/<34>/r/<13>
+	.ascii	/t/<9>/v/<11>/z/<0>/"/<34>/\/<92>
+	.byte	0
+
+	newpage	<Comments>
+;+++
+;c> ( -- ( "ccc<paren>" -- ) a comment.  In a file, it may go on for
+;	more than one line.
+;---
+	defword	paren,^~(~,f_imm
+10$:	movl	#^a/)/,-(r11)
+	jsb	parse
+	addl2	#8,r11
+	tstl	v_toin			; found the ) ?
+	beql	20$
+	addl3	v_srcaddr,v_toin,r0
+	cmpb	-1(r0),#^a/)/
+	beql	30$
+20$:	tstl	v_srcid			; no: in a file?
+	bleq	30$
+	tstl	v_blk
+	bneq	30$
+	jsb	refill			; yes, go on to the next line
+	tstl	(r11)+
+	bneq	10$
+30$:	rsb
+
+;+++
+;c> \ -- ( "ccc<eol>" -- )
+;---
+	defword	backslash,^~\~,f_imm
+	tstl	v_blk			; a block?
+	bneq	10$
+	movl	v_srclen,v_toin		; no, skip the rest of the line
+	rsb
+10$:	addl2	#63,v_toin		; yes, to the end of its 64-char line
+	bicl2	#63,v_toin
+	rsb
+
+;+++
+;c> .( -- ( "ccc<paren>" -- )
+;---
+	defword	dotparen,^~.(~,f_imm
+	movl	#^a/)/,-(r11)
+	jsb	parse
+	brw	type
+
+	newpage	<Conditional Compilation>
+;+++
+;s> s_namecmp -- compare r6, r7 with the counted string at r2,
+;	ignoring case.  Z set if they are the same.  Uses r0-r4.
+;---
+s_namecmp:
+	movzbl	(r2)+,r0
+	cmpl	r0,r7
+	bneq	20$
+	tstl	r7
+	beql	20$
+	movl	r6,r1
+	movl	r7,r4
+10$:	movzbl	(r1)+,r0
+	movzbl	(r2)+,r3
+	cmpb	v_upper[r0],v_upper[r3]
+	bneq	20$
+	sobgtr	r4,10$
+	clrl	r0			; Z set: equal
+20$:	rsb
+
+;+++
+;t> [ELSE] -- ( -- ) skip to the matching [THEN], counting nested [IF]s.
+;---
+	defword	bracketelse,^~[ELSE]~,f_imm
+	movl	#1,-(sp)		; nesting level
+10$:	jsb	parsename
+	movl	(r11)+,r7
+	movl	(r11)+,r6
+	tstl	r7
+	bneq	20$
+	jsb	refill			; end of line: get another
+	tstl	(r11)+
+	bneq	10$
+	tstl	(sp)+			; end of input
+	rsb
+20$:	moval	v_sif,r2
+	jsb	s_namecmp
+	bneq	30$
+	incl	(sp)			; [IF]: one deeper
+	brb	10$
+30$:	moval	v_selse,r2
+	jsb	s_namecmp
+	bneq	40$
+	decl	(sp)			; [ELSE]
+	beql	50$			; at our level: done
+	incl	(sp)
+	brb	10$
+40$:	moval	v_sthen,r2
+	jsb	s_namecmp
+	bneq	10$
+	decl	(sp)			; [THEN]
+	bneq	10$
+50$:	tstl	(sp)+
+	rsb
+
+v_sif:	cstring	<[IF]>
+v_selse: cstring <[ELSE]>
+v_sthen: cstring <[THEN]>
+
+;+++
+;t> [IF] -- ( flag -- )
+;---
+	defword	bracketif,^~[IF]~,f_imm
+	tstl	(r11)+
+	bneq	10$
+	brw	bracketelse
+10$:	rsb
+
+;+++
+;t> [THEN] -- ( -- )
+;---
+	defword	bracketthen,^~[THEN]~,f_imm
+	rsb
+
+;+++
+;t> [DEFINED] -- ( "name" -- flag )  [UNDEFINED] -- ( "name" -- flag )
+;---
+	defword	bracketdefined,^~[DEFINED]~,f_imm
+	jsb	parsename
+	movl	(r11)+,r7
+	movl	(r11)+,r6
+	jsb	s_find
+	beql	10$
+	mnegl	#1,-(r11)
+	rsb
+10$:	clrl	-(r11)
+	rsb
+
+	defword	bracketundefined,^~[UNDEFINED]~,f_imm
+	jsb	bracketdefined
+	mcoml	(r11),(r11)
+	rsb
+
+	newpage	<Structures>
+;+++
+;f> +FIELD -- ( n1 n2 "name" -- n3 ) name: ( addr1 -- addr2 )
+;---
+	defword	plusfield,^~+FIELD~
+	jsb	s_parsehdr
+	movl	#do_field,r0
+	jsb	s_cjsb
+	movl	4(r11),r0		; offset n1
+	jsb	s_cl
+	addl2	(r11)+,(r11)		; n3 = n1+n2
+	rsb
+
+;+++
+;f> FIELD: CFIELD: -- ( n1 "name" -- n2 )
+;---
+	defword	fieldc,^~FIELD:~
+	jsb	aligned
+	movl	#4,-(r11)
+	brb	plusfield
+
+	defword	cfieldc,^~CFIELD:~
+	movl	#1,-(r11)
+	brb	plusfield
+
+;+++
+;f> BEGIN-STRUCTURE -- ( "name" -- struct-sys 0 ) name: ( -- +n )
+;---
+	defword	beginstructure,^~BEGIN-STRUCTURE~
+	jsb	s_parsehdr
+	movl	#do_const,r0
+	jsb	s_cjsb
+	movl	v_dp,-(r11)		; where the size goes
+	clrl	r0
+	jsb	s_cl
+	clrl	-(r11)
+	rsb
+
+;+++
+;f> END-STRUCTURE -- ( struct-sys +n -- )
+;---
+	defword	endstructure,^~END-STRUCTURE~
+	movl	(r11)+,@(r11)+
+	rsb

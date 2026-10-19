@@ -1,0 +1,337 @@
+	newpage	<Blocks>
+;******************************************************************************
+;
+; VFBLOCK.MAR -- the Block word set.
+;
+; Blocks are kept in the file BLOCKS.FB in the default directory (OPEN-BLOCKS
+; names another), which is made when first needed.  Block n is the 1024
+; bytes at byte (n-1)*1024 of the file; blocks past its end read as spaces.
+; There are c_nbuffers buffers, each with a header of
+;	long	-- the block in it, or 0 if it is unassigned
+;	long	-- true if it has been UPDATEd
+;	long	-- when it was last used, to pick the least recent one
+;
+;******************************************************************************
+	.psect	vf_data
+v_blkfid:	.long	0		; the blocks file's fcb, 0 if not open
+v_blkname:	.ascii	/BLOCKS.FB/	; its name
+		.blkb	256-9
+v_blknlen:	.long	9
+v_bufhdr:	.blkl	3*c_nbuffers	; buffer headers
+v_bufs:		.blkb	c_blocksize*c_nbuffers ; buffers
+v_curbuf:	.long	0		; the buffer last used
+v_clock:	.long	0		; use counter
+
+	.psect	vf_code
+;+++
+;s> s_blkopen -- open the blocks file if it isn't open, making it if it
+;	doesn't exist.  r8 = its fcb.
+;---
+s_blkopen:
+	movl	v_blkfid,r8
+	beql	10$
+	rsb
+10$:	moval	v_blkname,r6
+	movl	v_blknlen,r7
+	movl	#c_famr!c_famw,r5
+	clrl	r4
+	jsb	s_open
+	tstl	r0
+	beql	20$
+	cmpl	r0,#rms$_fnf		; not there: make it
+	beql	15$
+	brw	r_throw_r0
+15$:	moval	v_blkname,-(r11)
+	movl	v_blknlen,-(r11)
+	movl	#c_famr!c_famw,-(r11)
+	jsb	createfile
+	movl	(r11)+,r0
+	movl	(r11)+,r8
+	tstl	r0
+	beql	20$
+	brw	r_throw_r0
+20$:	movl	r8,v_blkfid
+	rsb
+
+;+++
+;s> s_bufaddr -- r1 = address of buffer r4's data, r2 = its header.
+;---
+s_bufaddr:
+	mull3	#c_blocksize,r4,r1
+	movab	v_bufs[r1],r1
+	mull3	#12,r4,r2
+	movab	v_bufhdr[r2],r2
+	rsb
+
+;+++
+;s> s_blkread -- read block r3 into buffer r4.  r0 = status.
+;---
+s_blkread:
+	jsb	s_blkopen
+	pushl	r4
+	jsb	s_bufaddr
+	movl	r1,r6
+	decl	r3
+	mull3	#c_blocksize,r3,r2
+	jsb	s_seek
+	blbc	r0,30$
+	movl	#c_blocksize,r7
+10$:	pushl	r6
+	jsb	s_getc
+	movl	(sp)+,r6
+	blbc	r0,20$
+	movb	r1,(r6)+
+	sobgtr	r7,10$
+	brb	30$
+20$:	tstl	r0			; past the end: spaces
+	bneq	30$
+	pushl	r7
+	movc5	#0,(r6),#c_bl,r7,(r6)
+	movl	(sp)+,r7
+	movl	#1,r0
+30$:	movl	(sp)+,r4
+	rsb
+
+;+++
+;s> s_blkwrite -- write buffer r4 to its block.  r0 = status.
+;---
+s_blkwrite:
+	jsb	s_blkopen
+	pushl	r4
+	jsb	s_bufaddr
+	movl	r1,r6
+	movl	(r2),r3			; its block
+	decl	r3
+	mull3	#c_blocksize,r3,r3
+10$:	cmpl	fcb_size(r8),r3		; fill any gap before it with spaces
+	bgeq	20$
+	movl	fcb_size(r8),fcb_pos(r8)
+	pushl	r3
+	movl	#c_bl,r1
+	jsb	s_putc
+	movl	(sp)+,r3
+	blbs	r0,10$
+	brb	40$
+20$:	movl	r3,r2
+	jsb	s_seek
+	blbc	r0,40$
+	movl	#c_blocksize,r7
+30$:	movzbl	(r6)+,r1
+	pushl	r6
+	jsb	s_putc
+	movl	(sp)+,r6
+	blbc	r0,40$
+	sobgtr	r7,30$
+	movl	(sp),r4
+	jsb	s_bufaddr
+	clrl	4(r2)			; not updated any more
+40$:	movl	(sp)+,r4
+	rsb
+
+;+++
+;s> s_getbuf -- find or assign a buffer for block r3, reading it if r5 is
+;	true.  r1 = its address.
+;---
+s_getbuf:
+	tstl	r3			; block 0 isn't one
+	bgtr	5$
+	throw	t_badblock
+5$:	incl	v_clock
+	clrl	r4			; in a buffer already?
+10$:	jsb	s_bufaddr
+	cmpl	(r2),r3
+	beql	80$
+	aoblss	#c_nbuffers,r4,10$
+	clrl	r4			; no: an unassigned one,
+	mnegl	#1,r7			; or the least recently used
+	clrl	r6
+20$:	jsb	s_bufaddr
+	tstl	(r2)
+	beql	40$
+	cmpl	8(r2),r7
+	bgequ	30$
+	movl	8(r2),r7
+	movl	r4,r6
+30$:	aoblss	#c_nbuffers,r4,20$
+	movl	r6,r4
+	jsb	s_bufaddr
+	tstl	4(r2)			; updated?
+	beql	40$
+	pushl	r3
+	pushl	r5
+	jsb	s_blkwrite
+	movl	(sp)+,r5
+	movl	(sp)+,r3
+	blbs	r0,35$
+	throw	t_blockwrite
+35$:	jsb	s_bufaddr
+40$:	clrl	(r2)			; unassigned until it is read
+	clrl	4(r2)
+	tstl	r5
+	beql	50$
+	pushl	r3
+	jsb	s_blkread
+	movl	(sp)+,r3
+	blbs	r0,50$
+	throw	t_blockread
+50$:	jsb	s_bufaddr
+	movl	r3,(r2)
+80$:	movl	v_clock,8(r2)
+	movl	r4,v_curbuf
+	rsb
+
+;+++
+;b> BLOCK -- ( u -- a-addr )
+;---
+	defword	block,^~BLOCK~
+	movl	(r11),r3
+	movl	#1,r5
+	jsb	s_getbuf
+	movl	r1,(r11)
+	rsb
+
+;+++
+;b> BUFFER -- ( u -- a-addr )
+;---
+	defword	buffer,^~BUFFER~
+	movl	(r11),r3
+	clrl	r5
+	jsb	s_getbuf
+	movl	r1,(r11)
+	rsb
+
+;+++
+;b> UPDATE -- ( -- )
+;---
+	defword	update,^~UPDATE~
+	movl	v_curbuf,r4
+	jsb	s_bufaddr
+	tstl	(r2)
+	beql	10$
+	movl	#1,4(r2)
+10$:	rsb
+
+;+++
+;b> SAVE-BUFFERS -- ( -- )
+;---
+	defword	savebuffers,^~SAVE-BUFFERS~
+	clrl	r4
+10$:	jsb	s_bufaddr
+	tstl	(r2)
+	beql	20$
+	tstl	4(r2)
+	beql	20$
+	jsb	s_blkwrite
+	blbs	r0,20$
+	throw	t_blockwrite
+20$:	aoblss	#c_nbuffers,r4,10$
+	movl	v_blkfid,r8
+	beql	30$
+	jsb	s_fflush
+30$:	rsb
+
+;+++
+;b> EMPTY-BUFFERS -- ( -- )
+;---
+	defword	emptybuffers,^~EMPTY-BUFFERS~
+	movc5	#0,(sp),#0,#12*c_nbuffers,v_bufhdr
+	rsb
+
+;+++
+;b> FLUSH -- ( -- )
+;---
+	defword	flush,^~FLUSH~
+	jsb	savebuffers
+	brb	emptybuffers
+
+;+++
+;b> SCR -- ( -- a-addr )
+;---
+	defword	scr,^~SCR~,inl=1
+	movl	#v_scr,-(r11)
+scr_e:	rsb
+
+;+++
+;b> LOAD -- ( i*x u -- j*x )
+;---
+	defword	load,^~LOAD~
+	movl	(r11),r3
+	bgtr	10$
+	throw	t_badblock
+10$:	pushl	v_blk
+	pushl	v_toin
+	pushl	v_srclen
+	pushl	v_srcaddr
+	pushl	v_srcid
+	jsb	block
+	movl	(r11)+,v_srcaddr
+	movl	r3,v_blk
+	clrl	v_srcid
+	clrl	v_toin
+	movl	#c_blocksize,v_srclen
+	jsb	interpret
+	movl	(sp)+,v_srcid
+	movl	(sp)+,v_srcaddr
+	movl	(sp)+,v_srclen
+	movl	(sp)+,v_toin
+	movl	(sp)+,v_blk
+	beql	20$			; loading from a block before?
+	movl	v_blk,-(r11)		; yes, it may be in another buffer now
+	jsb	block
+	movl	(r11)+,v_srcaddr
+20$:	rsb
+
+;+++
+;b> THRU -- ( i*x u1 u2 -- j*x )
+;---
+	defword	thru,^~THRU~
+	movl	(r11)+,-(sp)		; last
+	movl	(r11)+,-(sp)		; next
+10$:	cmpl	(sp),4(sp)
+	bgtr	20$
+	movl	(sp),-(r11)
+	jsb	load
+	incl	(sp)
+	brb	10$
+20$:	addl2	#8,sp
+	rsb
+
+;+++
+;b> LIST -- ( u -- )
+;---
+	defword	list,^~LIST~
+	movl	(r11),v_scr
+	jsb	block
+	movl	(r11)+,-(sp)		; address of the line
+	clrl	r8
+10$:	movl	r8,-(r11)		; line number
+	movl	#2,-(r11)
+	jsb	dotr
+	jsb	space
+	movl	(sp),r6
+	movl	#64,r7
+	jsb	s_typer6
+	addl2	#64,(sp)
+	jsb	s_endline
+	aoblss	#16,r8,10$
+	tstl	(sp)+
+	rsb
+
+;+++
+;v> OPEN-BLOCKS -- ( c-addr u -- ) use the file named for blocks from now
+;	on, saving and emptying the buffers first.
+;---
+	defword	openblocks,^~OPEN-BLOCKS~
+	jsb	flush
+	movl	v_blkfid,r8
+	beql	10$
+	jsb	s_close
+	clrl	v_blkfid
+10$:	movl	(r11)+,r7
+	movl	(r11)+,r6
+	cmpl	r7,#255
+	blequ	20$
+	movl	#255,r7
+20$:	movl	r7,v_blknlen
+	movc3	r7,(r6),v_blkname
+	rsb

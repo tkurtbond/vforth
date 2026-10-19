@@ -1,0 +1,278 @@
+	newpage	<Double Numbers>
+;******************************************************************************
+;
+; VFDOUBLE.MAR -- the rest of the Double-Number word set, and the
+; Memory-Allocation word set.  On the stack a double has its high cell on
+; top: (r11) = high, 4(r11) = low.
+;
+;******************************************************************************
+	.psect	vf_code
+
+;+++
+;d> D+ -- ( d1 d2 -- d3 )
+;---
+	defword	dplus,^~D+~,inl=1
+	addl2	4(r11),12(r11)
+	adwc	(r11),8(r11)
+	addl2	#8,r11
+dplus_e: rsb
+
+;+++
+;d> D- -- ( d1 d2 -- d3 )
+;---
+	defword	dminus,^~D-~,inl=1
+	subl2	4(r11),12(r11)
+	sbwc	(r11),8(r11)
+	addl2	#8,r11
+dminus_e: rsb
+
+;+++
+;d> M+ -- ( d1 n -- d2 )
+;---
+	defword	mplus,^~M+~,inl=1
+	movl	(r11)+,r0
+	ashl	#-31,r0,r1
+	addl2	r0,4(r11)
+	adwc	r1,(r11)
+mplus_e: rsb
+
+;+++
+;d> D0< -- ( d -- flag )
+;---
+	defword	dzless,^~D0<~,inl=1
+	tstl	(r11)+
+	ashl	#-31,-4(r11),(r11)
+dzless_e: rsb
+
+;+++
+;d> D0= -- ( d -- flag )
+;---
+	defword	dzeq,^~D0=~,inl=1
+	bisl3	(r11)+,(r11),r0
+	beql	1$
+	clrl	(r11)
+	brb	dzeq_e
+1$:	mnegl	#1,(r11)
+dzeq_e:	rsb
+
+;+++
+;d> D2* -- ( xd1 -- xd2 )  D2/ -- ( xd1 -- xd2 )
+;---
+	defword	dtwostar,^~D2*~,inl=1
+	movl	4(r11),r0
+	movl	(r11),r1
+	ashq	#1,r0,r0
+	movl	r0,4(r11)
+	movl	r1,(r11)
+dtwostar_e: rsb
+
+	defword	dtwoslash,^~D2/~,inl=1
+	movl	4(r11),r0
+	movl	(r11),r1
+	ashq	#-1,r0,r0
+	movl	r0,4(r11)
+	movl	r1,(r11)
+dtwoslash_e: rsb
+
+;+++
+;d> D>S -- ( d -- n )
+;---
+	defword	dtos,^~D>S~,inl=1
+	tstl	(r11)+
+dtos_e:	rsb
+
+;+++
+;s> s_dcmp -- compare d1 and d2 on the stack, signed (r0 = 0) or unsigned
+;	(r0 = 1), and drop them.  r0 = -1, 0 or 1 for d1 <, =, > d2.
+;---
+s_dcmp:	movl	(sp)+,r3
+	movq	(r11)+,r1		; r1 = high2, r2 = low2
+	movl	(r11)+,r4		; high1
+	movl	(r11)+,r5		; low1
+	tstl	r0
+	bneq	10$
+	cmpl	r4,r1			; signed high cells
+	blss	40$
+	bgtr	50$
+	brb	20$
+10$:	cmpl	r4,r1			; unsigned high cells
+	blssu	40$
+	bgtru	50$
+20$:	cmpl	r5,r2			; low cells, unsigned
+	blssu	40$
+	bgtru	50$
+	clrl	r0
+	jmp	(r3)
+40$:	mnegl	#1,r0
+	jmp	(r3)
+50$:	movl	#1,r0
+	jmp	(r3)
+
+;+++
+;d> D< -- ( d1 d2 -- flag )  D= -- ( xd1 xd2 -- flag )
+;d> DU< -- ( ud1 ud2 -- flag )
+;---
+	defword	dless,^~D<~
+	clrl	r0
+	jsb	s_dcmp
+	ashl	#-31,r0,-(r11)		; -1 if less, else 0
+	rsb
+
+	defword	dequal,^~D=~
+	clrl	r0
+	jsb	s_dcmp
+	tstl	r0
+	beql	10$
+	clrl	-(r11)
+	rsb
+10$:	mnegl	#1,-(r11)
+	rsb
+
+	defword	duless,^~DU<~
+	movl	#1,r0
+	jsb	s_dcmp
+	ashl	#-31,r0,-(r11)
+	rsb
+
+;+++
+;d> DMAX DMIN -- ( d1 d2 -- d3 )
+;---
+	defword	dmax,^~DMAX~
+	movq	8(r11),-(r11)		; d1 d2 d1 d2
+	movq	8(r11),-(r11)
+	jsb	dless			; d1 < d2?
+	tstl	(r11)+
+	bneq	10$
+	addl2	#8,r11			; no: keep d1
+	rsb
+10$:	movq	(r11)+,(r11)		; yes: keep d2
+	rsb
+
+	defword	dmin,^~DMIN~
+	movq	8(r11),-(r11)
+	movq	8(r11),-(r11)
+	jsb	dless
+	tstl	(r11)+
+	beql	10$
+	addl2	#8,r11			; d1 < d2: keep d1
+	rsb
+10$:	movq	(r11)+,(r11)
+	rsb
+
+;+++
+;s> s_umul -- unsigned r0 * r1 into r2 (low), r3 (high).
+;---
+s_umul:	emul	r0,r1,#0,r2
+	tstl	r0
+	bgeq	10$
+	addl2	r1,r3
+10$:	tstl	r1
+	bgeq	20$
+	addl2	r0,r3
+20$:	rsb
+
+;+++
+;d> M*/ -- ( d1 n1 +n2 -- d2 ) d1*n1/n2 with a triple-cell intermediate,
+;	symmetric.
+;---
+	defword	mstarslash,^~M*/~
+	movl	(r11)+,r8		; n2
+	bneq	5$
+	throw	t_divzero
+5$:	movl	(r11)+,r7		; n1
+	xorl3	r7,(r11),-(sp)		; sign of the result
+	tstl	r7
+	bgeq	10$
+	mnegl	r7,r7
+10$:	jsb	dabs
+	movl	4(r11),r0		; low * |n1|
+	movl	r7,r1
+	jsb	s_umul
+	movl	r2,r6			; t0
+	movl	r3,-(sp)		; part of t1
+	movl	(r11),r0		; high * |n1|
+	movl	r7,r1
+	jsb	s_umul
+	addl2	(sp)+,r2		; t1
+	adwc	#0,r3			; t2
+	movl	r2,r7
+	movl	r3,r2			; t2 / n2
+	clrl	r3
+	movl	r8,r4
+	jsb	s_umdiv
+	movl	r7,r2			; (rem:t1) / n2
+	jsb	s_umdiv
+	movl	r2,(r11)		; high of the quotient
+	movl	r6,r2			; (rem:t0) / n2
+	jsb	s_umdiv
+	movl	r2,4(r11)		; low
+	tstl	(sp)+			; negative?
+	bgeq	20$
+	brw	dnegate
+20$:	rsb
+
+	newpage	<Memory Allocation>
+;******************************************************************************
+;
+; ALLOCATE gets memory from LIB$GET_VM, 8 bytes more than asked for, and
+; keeps the size in the first longword, for FREE and RESIZE.
+;
+;******************************************************************************
+;+++
+;m> ALLOCATE -- ( u -- a-addr ior )
+;---
+	defword	allocate,^~ALLOCATE~
+	addl3	#8,(r11),v_vmsize
+	bcs	20$			; too big
+	pushal	v_vmaddr
+	pushal	v_vmsize
+	calls	#2,g^lib$get_vm
+	blbc	r0,30$
+	movl	v_vmaddr,r1
+	movl	(r11),(r1)
+	addl3	#8,r1,(r11)
+	clrl	-(r11)
+	rsb
+20$:	movl	#ss$_insfmem,r0
+30$:	movl	r0,-(r11)
+	rsb
+
+;+++
+;m> FREE -- ( a-addr -- ior )
+;---
+	defword	free,^~FREE~
+	subl3	#8,(r11),v_vmaddr
+	addl3	#8,@v_vmaddr,v_vmsize
+	pushal	v_vmaddr
+	pushal	v_vmsize
+	calls	#2,g^lib$free_vm
+	jsb	s_ior
+	movl	r0,(r11)
+	rsb
+
+;+++
+;m> RESIZE -- ( a-addr1 u -- a-addr2 ior )
+;---
+	defword	resize,^~RESIZE~
+	movl	(r11),-(r11)		; a1 u u
+	jsb	allocate		; a1 u a2 ior
+	tstl	(r11)
+	beql	10$
+	movl	(r11)+,r0		; failed: a1 ior
+	tstl	(r11)+
+	movl	r0,(r11)
+	rsb
+10$:	tstl	(r11)+			; a1 u a2
+	movl	(r11),r3		; a2
+	movl	8(r11),r1		; a1
+	movl	-8(r1),r6		; old size
+	cmpl	r6,4(r11)
+	blequ	20$
+	movl	4(r11),r6		; the smaller
+20$:	jsb	s_move
+	movl	8(r11),-(r11)		; free a1
+	jsb	free
+	movl	(r11)+,r0
+	movl	(r11)+,4(r11)		; a2 ior
+	movl	r0,(r11)
+	rsb

@@ -1,0 +1,272 @@
+	newpage	<Search Order>
+;******************************************************************************
+;
+; VFSEARCH.MAR -- the Search-Order word set and ENVIRONMENT?.
+;
+;******************************************************************************
+	.psect	vf_code
+
+;+++
+;o> FORTH-WORDLIST -- ( -- wid )
+;---
+	defword	forthwordlist,^~FORTH-WORDLIST~,inl=1
+	movl	#wid_forth,-(r11)
+forthwordlist_e: rsb
+
+;+++
+;o> GET-CURRENT -- ( -- wid )  SET-CURRENT -- ( wid -- )
+;---
+	defword	getcurrent,^~GET-CURRENT~
+	movl	v_current,-(r11)
+	rsb
+
+	defword	setcurrent,^~SET-CURRENT~
+	movl	(r11)+,v_current
+	rsb
+
+;+++
+;o> DEFINITIONS -- ( -- )
+;---
+	defword	definitions,^~DEFINITIONS~
+	movl	v_order,v_current
+	rsb
+
+;+++
+;o> GET-ORDER -- ( -- widn ... wid1 n )
+;---
+	defword	getorder,^~GET-ORDER~
+	movl	v_norder,r0
+	beql	20$
+10$:	movl	v_order-4[r0],-(r11)	; the last searched first
+	sobgtr	r0,10$
+20$:	movl	v_norder,-(r11)
+	rsb
+
+;+++
+;o> SET-ORDER -- ( widn ... wid1 n -- )
+;---
+	defword	setorder,^~SET-ORDER~
+	movl	(r11)+,r1
+	bgeq	10$
+	brb	only			; -1: the minimum search order
+10$:	cmpl	r1,#c_maxorder
+	blequ	20$
+	throw	t_orderover
+20$:	movl	r1,v_norder
+	clrl	r0
+	tstl	r1
+	beql	40$
+30$:	movl	(r11)+,v_order[r0]	; wid1 is on top
+	aoblss	r1,r0,30$
+40$:	rsb
+
+;+++
+;o> WORDLIST -- ( -- wid )
+;---
+	defword	wordlist,^~WORDLIST~
+	jsb	align
+	movl	v_dp,r0
+	movl	r0,-(r11)
+	clrl	(r0)+			; empty
+	movl	v_wlchain,(r0)+		; chain of word lists
+	clrl	(r0)+			; no name
+	movl	(r11),v_wlchain
+	movl	r0,v_dp
+	brw	s_checkdict
+
+;+++
+;o> ONLY -- ( -- ) the minimum search order: FORTH-WORDLIST alone.
+;---
+	defword	only,^~ONLY~
+	movl	#1,v_norder
+	moval	wid_forth,v_order
+	rsb
+
+;+++
+;o> ALSO -- ( -- ) duplicate the first word list in the search order.
+;---
+	defword	also,^~ALSO~
+	movl	v_norder,r0
+	cmpl	r0,#c_maxorder
+	blss	10$
+	throw	t_orderover
+10$:	tstl	r0
+	beql	30$
+20$:	movl	v_order-4[r0],v_order[r0]
+	sobgtr	r0,20$
+30$:	incl	v_norder
+	rsb
+
+;+++
+;o> PREVIOUS -- ( -- ) remove the first word list from the search order.
+;---
+	defword	previous,^~PREVIOUS~
+	movl	v_norder,r1
+	bgtr	10$
+	throw	t_orderunder
+10$:	clrl	r0
+	decl	r1
+	beql	30$
+20$:	movl	v_order+4[r0],v_order[r0]
+	aoblss	r1,r0,20$
+30$:	decl	v_norder
+	rsb
+
+;+++
+;o> FORTH -- ( -- ) make FORTH-WORDLIST the first in the search order.
+;---
+	defword	forth,^~FORTH~
+	moval	wid_forth,r0
+r_setfirst:
+	tstl	v_norder
+	bneq	10$
+	movl	#1,v_norder
+10$:	movl	r0,v_order
+	rsb
+
+;+++
+;v> VOCABULARY -- ( "name" -- ) make a named word list; name makes it the
+;	first in the search order.
+;---
+	defword	vocabulary,^~VOCABULARY~
+	jsb	create
+	movl	v_latest,-(sp)
+	jsb	wordlist
+	movl	(r11)+,r0
+	movl	(sp)+,8(r0)		; its name
+	movl	#do_vocabulary,r1	; patch CREATE's JSB
+	movl	v_latestxt,r2
+	movl	r1,2(r2)
+	rsb
+do_vocabulary:
+	movl	(sp)+,r0		; the body: wid
+	brb	r_setfirst
+
+;+++
+;s> s_wlname -- type the name of word list r0.
+;---
+s_wlname:
+	movl	8(r0),r1		; named?
+	beql	10$
+	movzbl	4(r1),r7
+	bicl2	#h_hidden,r7
+	movab	5(r1),r6
+	jsb	s_typer6
+	brw	space
+10$:	movl	r0,-(r11)		; no, show its address
+	jsb	udot
+	rsb
+
+;+++
+;o> ORDER -- ( -- ) show the search order, first searched first, and
+;	the compilation word list.
+;---
+	defword	order,^~ORDER~
+	clrl	-(sp)
+10$:	movl	(sp),r0
+	cmpl	r0,v_norder
+	bgeq	20$
+	movl	v_order[r0],r0
+	jsb	s_wlname
+	incl	(sp)
+	brb	10$
+20$:	tstl	(sp)+
+	moval	v_scurrent,r6
+	movl	#10,r7
+	jsb	s_typer6
+	movl	v_current,r0
+	jsb	s_wlname
+	brw	cr
+v_scurrent:	.ascii	/  Current: /
+
+;+++
+;t> ASSEMBLER -- ( -- ) EDITOR -- ( -- ) put these (empty) word lists
+;	first in the search order.
+;---
+	defword	assembler,^~ASSEMBLER~
+	moval	wid_asm,r0
+	brw	r_setfirst
+
+	defword	editor,^~EDITOR~
+	moval	wid_editor,r0
+	brw	r_setfirst
+
+	.psect	vf_data
+wid_asm:	.long	0,wid_forth,0
+wid_editor:	.long	0,wid_asm,0
+	.psect	vf_code
+
+	newpage	<Environmental Queries>
+;+++
+;c> ENVIRONMENT? -- ( c-addr u -- false | i*x true )
+;---
+	defword	environmentq,^~ENVIRONMENT?~
+	movl	(r11)+,r7
+	movl	(r11)+,r6
+	moval	wid_env,r8
+	jsb	s_search
+	bneq	10$
+	clrl	-(r11)
+	rsb
+10$:	jsb	s_ntxt
+	jsb	(r1)
+	mnegl	#1,-(r11)
+	rsb
+
+	.macro	envconst lbl,name,value
+	defword	lbl,^~name~,wl=env
+	movl	#value,-(r11)
+	rsb
+	.endm	envconst
+
+	envconst e_cstring,/COUNTED-STRING,255
+	envconst e_hold,/HOLD,c_holdsize
+	envconst e_pad,/PAD,c_padsize
+	envconst e_aubits,ADDRESS-UNIT-BITS,8
+	envconst e_floored,FLOORED,0
+	envconst e_maxchar,MAX-CHAR,255
+	envconst e_maxn,MAX-N,2147483647
+	envconst e_maxu,MAX-U,-1
+	envconst e_rscells,RETURN-STACK-CELLS,c_rs_bytes/4
+	envconst e_stackcells,STACK-CELLS,c_ds_cells
+	envconst e_fstack,FLOATING-STACK,c_fs_items
+	envconst e_locals,#LOCALS,c_maxlocals
+	envconst e_wordlists,WORDLISTS,c_maxorder
+
+;
+; The Forth-94 word set queries (obsolescent): all are present.
+;
+	envconst e_ws_core,CORE,-1
+	envconst e_ws_core_ext,CORE-EXT,-1
+	envconst e_ws_block,BLOCK,-1
+	envconst e_ws_block_ext,BLOCK-EXT,-1
+	envconst e_ws_double,DOUBLE,-1
+	envconst e_ws_double_ext,DOUBLE-EXT,-1
+	envconst e_ws_exception,EXCEPTION,-1
+	envconst e_ws_exception_ext,EXCEPTION-EXT,-1
+	envconst e_ws_facility,FACILITY,-1
+	envconst e_ws_facility_ext,FACILITY-EXT,-1
+	envconst e_ws_file,FILE,-1
+	envconst e_ws_file_ext,FILE-EXT,-1
+	envconst e_ws_floating,FLOATING,-1
+	envconst e_ws_floating_ext,FLOATING-EXT,-1
+	envconst e_ws_locals,LOCALS,-1
+	envconst e_ws_locals_ext,LOCALS-EXT,-1
+	envconst e_ws_memory_alloc,MEMORY-ALLOC,-1
+	envconst e_ws_memory_alloc_ext,MEMORY-ALLOC-EXT,-1
+	envconst e_ws_tools,TOOLS,-1
+	envconst e_ws_tools_ext,TOOLS-EXT,-1
+	envconst e_ws_search_order,SEARCH-ORDER,-1
+	envconst e_ws_search_order_ext,SEARCH-ORDER-EXT,-1
+	envconst e_ws_string,STRING,-1
+	envconst e_ws_string_ext,STRING-EXT,-1
+
+	defword	e_maxd,^~MAX-D~,wl=env
+	mnegl	#1,-(r11)
+	movl	#^x7fffffff,-(r11)
+	rsb
+
+	defword	e_maxud,^~MAX-UD~,wl=env
+	mnegl	#1,-(r11)
+	mnegl	#1,-(r11)
+	rsb

@@ -1,0 +1,3 @@
+[submodule "forth-standard-test-suite"]
+	path = forth-standard-test-suite
+	url = https://github.com/Forth-Standard/forth-standard-test-suite.git

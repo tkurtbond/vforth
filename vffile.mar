@@ -1,0 +1,1091 @@
+	newpage	<Files>
+;******************************************************************************
+;
+; VFFILE.MAR -- the File-Access word set.
+;
+; A fileid is the address of a file control block (FCB), allocated with
+; LIB$GET_VM, holding the file's RMS blocks and buffers.  Forth sees a file
+; as a stream of bytes, with LF ending each line.  A file is used in one of
+; two modes, chosen when it is opened:
+;
+;   Stream mode, for Stream_LF, Stream, Stream_CR and undefined format
+;	files, and fixed 512-byte record files: the file's bytes are read and
+;	written with RMS block I/O, a 512-byte disk block at a time, through
+;	the FCB's block buffer.  These bytes are the file's contents.  RMS
+;	sets the end of file just after the highest byte written with block
+;	I/O; RESIZE-FILE shortens a file with $FIND by RFA and $TRUNCATE.
+;	CREATE-FILE always makes a Stream_LF file.
+;
+;   Record mode, for every other record format, like the variable length
+;	records of most VMS text files: each record read with $GET reads as
+;	its bytes and an LF, and the bytes written up to each LF are written
+;	as a record with $PUT.  REPOSITION-FILE rewinds and reads forward, and
+;	FILE-SIZE reads the whole file.  RESIZE-FILE isn't supported.
+;
+; An ior is 0 for success, or else the RMS status code, which THROW and the
+; error messages show as the VMS message.
+;
+;******************************************************************************
+	.extrn	sys$open, sys$create, sys$connect, sys$close, sys$read
+	.extrn	sys$write, sys$get, sys$put, sys$find, sys$truncate
+	.extrn	sys$rewind, sys$flush, sys$erase, sys$rename
+
+c_famr		= 1			; fam: read
+c_famw		= 2			;      write
+c_fambin	= 4			;      BIN (makes no difference)
+c_recsize	= 4096			; record buffer size
+
+;
+; The file control block
+;
+fcb_fab		= 0
+fcb_rab		= fcb_fab+fab$c_bln
+fcb_nam		= fcb_rab+rab$c_bln
+fcb_xab		= fcb_nam+nam$c_bln
+fcb_esa		= fcb_xab+xab$c_fhclen	; expanded name
+fcb_rsa		= fcb_esa+256		; resultant name
+fcb_mode	= fcb_rsa+256		; 0 stream, 1 record
+fcb_fam		= fcb_mode+4		; the fam it was opened with
+fcb_pos		= fcb_fam+4		; byte position
+fcb_size	= fcb_pos+4		; size in bytes (stream mode)
+fcb_bvbn	= fcb_size+4		; VBN of the block in the buffer, or 0
+fcb_dirty	= fcb_bvbn+4		; true if the buffer has been changed
+fcb_line	= fcb_dirty+4		; line number, for INCLUDE-FILE
+fcb_lpos	= fcb_line+4		; position of the line's start
+fcb_next	= fcb_lpos+4		; next open file
+fcb_rlen	= fcb_next+4		; record mode: length of the record
+fcb_roff	= fcb_rlen+4		;   next byte in it; > rlen: none
+fcb_wlen	= fcb_roff+4		;   bytes waiting to be written
+fcb_blk		= fcb_wlen+4		; block buffer
+fcb_rec		= fcb_blk+512		; record read buffer
+fcb_wbuf	= fcb_rec+c_recsize	; record write buffer
+fcb_lbuf	= fcb_wbuf+c_recsize	; INCLUDE-FILE's line buffer
+fcb_end		= fcb_lbuf+c_linesize
+
+	.psect	vf_data
+		.align	long
+p_fab:		$fab				; prototype RMS blocks
+p_rab:		$rab
+p_nam:		$nam
+p_xab:		$xabfhc
+v_fcbsize:	.long	fcb_end
+v_files:	.long	0			; open files
+v_included:	.long	0			; names of included files
+v_deftype:	.ascii	/.FTH/			; INCLUDED's default type
+v_vmaddr:	.long	0
+v_vmsize:	.long	0
+v_tmpfab:	.blkb	fab$c_bln		; for DELETE-FILE etc.
+v_tmpfab2:	.blkb	fab$c_bln
+
+	.psect	vf_code
+;+++
+;i> R/O R/W W/O BIN -- file access methods
+;---
+	defword	ro,^~R/O~,inl=1
+	movl	#c_famr,-(r11)
+ro_e:	rsb
+
+	defword	wo,^~W/O~,inl=1
+	movl	#c_famw,-(r11)
+wo_e:	rsb
+
+	defword	rw,^~R/W~,inl=1
+	movl	#c_famr!c_famw,-(r11)
+rw_e:	rsb
+
+	defword	bin,^~BIN~,inl=1
+	bisl2	#c_fambin,(r11)
+bin_e:	rsb
+
+	newpage	<Opening and Closing>
+;+++
+;s> s_ior -- turn the RMS status r0 into an ior (0 for success).
+;---
+s_ior:	blbc	r0,10$
+	clrl	r0
+10$:	rsb
+
+;+++
+;s> s_newfcb -- allocate and set up an FCB for the file named r6, r7,
+;	fam r5; r8 = the FCB.  r4 = 1 to use INCLUDED's default type.
+;---
+s_newfcb:
+	movl	#fcb_end,v_vmsize
+	pushal	v_vmaddr
+	pushal	v_vmsize
+	calls	#2,g^lib$get_vm
+	blbs	r0,5$
+	movl	r0,r8			; (no memory: the status)
+	rsb
+5$:	movl	v_vmaddr,r8
+	movq	r4,-(sp)
+	movc5	#0,(r8),#0,#fcb_end,(r8) ; clear it
+	movc3	#fab$c_bln,p_fab,fcb_fab(r8)
+	movc3	#rab$c_bln,p_rab,fcb_rab(r8)
+	movc3	#nam$c_bln,p_nam,fcb_nam(r8)
+	movc3	#xab$c_fhclen,p_xab,fcb_xab(r8)
+	movq	(sp)+,r4
+	cmpl	r7,#255
+	blequ	10$
+	movl	#255,r7
+10$:	movl	r6,fcb_fab+fab$l_fna(r8)
+	movb	r7,fcb_fab+fab$b_fns(r8)
+	tstl	r4
+	beql	15$
+	moval	v_deftype,fcb_fab+fab$l_dna(r8)
+	movb	#4,fcb_fab+fab$b_dns(r8)
+15$:	moval	fcb_nam(r8),fcb_fab+fab$l_nam(r8)
+	moval	fcb_xab(r8),fcb_fab+fab$l_xab(r8)
+	moval	fcb_esa(r8),fcb_nam+nam$l_esa(r8)
+	movb	#255,fcb_nam+nam$b_ess(r8)
+	moval	fcb_rsa(r8),fcb_nam+nam$l_rsa(r8)
+	movb	#255,fcb_nam+nam$b_rss(r8)
+	moval	fcb_fab(r8),fcb_rab+rab$l_fab(r8)
+	movl	r5,fcb_fam(r8)
+	clrb	fcb_fab+fab$b_fac(r8)	; access
+	bitl	#c_famr,r5
+	beql	20$
+	bisb2	#fab$m_get,fcb_fab+fab$b_fac(r8)
+20$:	bitl	#c_famw,r5
+	beql	30$
+	bisb2	#fab$m_put,fcb_fab+fab$b_fac(r8)
+	clrb	fcb_fab+fab$b_shr(r8)
+	brb	40$
+30$:	movb	#fab$m_shrget,fcb_fab+fab$b_shr(r8)
+40$:	movl	#1,fcb_roff(r8)		; no record yet
+	movl	#1,r0
+	rsb
+
+;+++
+;s> s_freefcb -- give back the FCB r8.
+;---
+s_freefcb:
+	movl	r8,v_vmaddr
+	movl	#fcb_end,v_vmsize
+	pushal	v_vmaddr
+	pushal	v_vmsize
+	calls	#2,g^lib$free_vm
+	rsb
+
+;+++
+;s> s_connect -- choose the mode of the opened file r8 and connect a
+;	RAB to it.  Sets its size, and links it into the open files.
+;---
+s_connect:
+	movzbl	fcb_fab+fab$b_rfm(r8),r0
+	cmpl	r0,#fab$c_stmlf
+	beql	20$
+	cmpl	r0,#fab$c_stm
+	beql	20$
+	cmpl	r0,#fab$c_stmcr
+	beql	20$
+	cmpl	r0,#fab$c_udf
+	beql	20$
+	cmpl	r0,#fab$c_fix
+	bneq	10$
+	cmpw	fcb_fab+fab$w_mrs(r8),#512
+	beql	20$
+10$:	movl	#1,fcb_mode(r8)		; record mode
+	moval	fcb_rec(r8),fcb_rab+rab$l_ubf(r8)
+	movw	#c_recsize,fcb_rab+rab$w_usz(r8)
+	bisl2	#rab$m_tpt,fcb_rab+rab$l_rop(r8) ; truncate on $PUT
+	mnegl	#1,fcb_size(r8)
+	brb	30$
+20$:	clrl	fcb_mode(r8)		; stream mode
+	bisl2	#rab$m_bio,fcb_rab+rab$l_rop(r8)
+	movl	fcb_xab+xab$l_ebk(r8),r0
+	beql	25$
+	decl	r0
+	ashl	#9,r0,r0
+	movzwl	fcb_xab+xab$w_ffb(r8),r1
+	addl2	r1,r0
+25$:	movl	r0,fcb_size(r8)
+30$:	pushab	fcb_rab(r8)
+	calls	#1,g^sys$connect
+	blbc	r0,40$
+	movl	v_files,fcb_next(r8)
+	movl	r8,v_files
+	moval	fcb_rsa(r8),fcb_fab+fab$l_fna(r8) ; its full name, to open
+	movb	fcb_nam+nam$b_rsl(r8),fcb_fab+fab$b_fns(r8) ; it again
+	clrb	fcb_fab+fab$b_dns(r8)
+40$:	rsb
+
+;+++
+;s> s_open -- open the file r6, r7 with fam r5 (default type if r4).
+;	out: r8 = fcb, r0 = ior.
+;---
+s_open:	jsb	s_newfcb
+	blbs	r0,5$
+	clrl	r8
+	rsb
+5$:	bisb2	#fab$m_bro,fcb_fab+fab$b_fac(r8)
+	pushab	fcb_fab(r8)
+	calls	#1,g^sys$open
+	blbc	r0,90$
+	jsb	s_connect
+	blbc	r0,80$
+	clrl	r0
+	rsb
+80$:	pushl	r0
+	pushab	fcb_fab(r8)
+	calls	#1,g^sys$close
+	movl	(sp)+,r0
+90$:	pushl	r0
+	jsb	s_freefcb
+	movl	(sp)+,r0
+	clrl	r8
+	rsb
+
+;+++
+;i> OPEN-FILE -- ( c-addr u fam -- fileid ior )
+;---
+	defword	openfile,^~OPEN-FILE~
+	movl	(r11)+,r5
+	movl	(r11)+,r7
+	movl	(r11),r6
+	clrl	r4
+	jsb	s_open
+	movl	r8,(r11)
+	movl	r0,-(r11)
+	rsb
+
+;+++
+;i> CREATE-FILE -- ( c-addr u fam -- fileid ior ) make a new Stream_LF
+;	file.
+;---
+	defword	createfile,^~CREATE-FILE~
+	movl	(r11)+,r5
+	movl	(r11)+,r7
+	movl	(r11),r6
+	clrl	r4
+	jsb	s_newfcb
+	blbs	r0,5$
+	clrl	(r11)
+	movl	r0,-(r11)
+	rsb
+5$:	movb	#fab$m_get!fab$m_put!fab$m_bio,fcb_fab+fab$b_fac(r8)
+	movb	#fab$c_stmlf,fcb_fab+fab$b_rfm(r8)
+	movb	#fab$m_cr,fcb_fab+fab$b_rat(r8)
+	movb	#fab$c_seq,fcb_fab+fab$b_org(r8)
+	pushab	fcb_fab(r8)
+	calls	#1,g^sys$create
+	blbc	r0,90$
+	jsb	s_connect
+	blbc	r0,80$
+	movl	r8,(r11)
+	clrl	-(r11)
+	rsb
+80$:	pushl	r0
+	pushab	fcb_fab(r8)
+	calls	#1,g^sys$close
+	movl	(sp)+,r0
+90$:	pushl	r0
+	jsb	s_freefcb
+	movl	(sp)+,r0
+	clrl	(r11)
+	movl	r0,-(r11)
+	rsb
+
+;+++
+;s> s_close -- close the file r8: write what is waiting, close it,
+;	unlink it from the open files, and free it.  r0 = ior.
+;---
+s_close:
+	jsb	s_fflush
+	pushl	r0
+	pushab	fcb_fab(r8)
+	calls	#1,g^sys$close
+	blbs	(sp),5$			; keep the first error
+	movl	(sp),r0
+5$:	tstl	(sp)+
+	pushl	r0
+	moval	v_files,r1		; unlink it
+10$:	movl	(r1),r2
+	beql	30$
+	cmpl	r2,r8
+	beql	20$
+	moval	fcb_next(r2),r1
+	brb	10$
+20$:	movl	fcb_next(r8),(r1)
+30$:	jsb	s_freefcb
+	movl	(sp)+,r0
+	brw	s_ior
+
+;+++
+;i> CLOSE-FILE -- ( fileid -- ior )
+;---
+	defword	closefile,^~CLOSE-FILE~
+	movl	(r11),r8
+	jsb	s_close
+	movl	r0,(r11)
+	rsb
+
+;+++
+;s> s_closeall -- close every open file (for BYE).
+;---
+s_closeall:
+10$:	movl	v_files,r8
+	beql	20$
+	jsb	s_close
+	brb	10$
+20$:	rsb
+
+	newpage	<Reading and Writing Bytes>
+;+++
+;s> s_sload -- make the block buffer of the stream file r8 hold the block
+;	with byte fcb_pos.  r0 = status.  Uses r0-r5.
+;---
+s_sload:
+	ashl	#-9,fcb_pos(r8),r2
+	incl	r2			; VBN
+	cmpl	r2,fcb_bvbn(r8)
+	bneq	5$
+	movl	#1,r0
+	rsb
+5$:	tstl	fcb_dirty(r8)
+	beql	10$
+	pushl	r2
+	jsb	s_swrite
+	movl	(sp)+,r2
+	blbs	r0,10$
+	rsb
+10$:	movl	r2,fcb_bvbn(r8)
+	pushl	r2
+	movc5	#0,(r8),#0,#512,fcb_blk(r8)
+	movl	(sp)+,r2
+	decl	r2
+	ashl	#9,r2,r2
+	cmpl	r2,fcb_size(r8)		; does the file have this block yet?
+	bgeq	20$			; no
+	movl	fcb_bvbn(r8),fcb_rab+rab$l_bkt(r8)
+	moval	fcb_blk(r8),fcb_rab+rab$l_ubf(r8)
+	movw	#512,fcb_rab+rab$w_usz(r8)
+	pushab	fcb_rab(r8)
+	calls	#1,g^sys$read
+	cmpl	r0,#rms$_eof
+	bneq	30$
+20$:	movl	#1,r0
+30$:	blbs	r0,40$
+	clrl	fcb_bvbn(r8)		; (a failed read leaves nothing)
+40$:	rsb
+
+;+++
+;s> s_swrite -- write the block buffer of the stream file r8, as far as
+;	the end of the file.
+;---
+s_swrite:
+	movl	fcb_bvbn(r8),r2
+	bneq	5$
+	movl	#1,r0
+	rsb
+5$:	decl	r2
+	ashl	#9,r2,r2		; position of the block
+	subl3	r2,fcb_size(r8),r1	; bytes of it in the file
+	cmpl	r1,#512
+	bleq	10$
+	movl	#512,r1
+10$:	movw	r1,fcb_rab+rab$w_rsz(r8)
+	moval	fcb_blk(r8),fcb_rab+rab$l_rbf(r8)
+	movl	fcb_bvbn(r8),fcb_rab+rab$l_bkt(r8)
+	pushab	fcb_rab(r8)
+	calls	#1,g^sys$write
+	blbc	r0,20$
+	clrl	fcb_dirty(r8)
+20$:	rsb
+
+;+++
+;s> s_rload -- read the next record of the record file r8 if the last
+;	is used up.  r0 = 1 if there is a byte to read, 0 at end of file,
+;	or an error status.
+;---
+s_rload:
+	cmpl	fcb_roff(r8),fcb_rlen(r8)
+	bgtr	10$
+	movl	#1,r0
+	rsb
+10$:	moval	fcb_rec(r8),fcb_rab+rab$l_ubf(r8)
+	movw	#c_recsize,fcb_rab+rab$w_usz(r8)
+	pushab	fcb_rab(r8)
+	calls	#1,g^sys$get
+	cmpl	r0,#rms$_eof
+	bneq	20$
+	clrl	r0
+	rsb
+20$:	blbs	r0,30$
+	cmpl	r0,#rms$_rtb		; record too big: take what fit
+	bneq	40$
+30$:	movzwl	fcb_rab+rab$w_rsz(r8),fcb_rlen(r8)
+	clrl	fcb_roff(r8)
+	movl	#1,r0
+40$:	rsb
+
+;+++
+;s> s_getc -- read a byte from the file r8 into r1.
+;	r0 = 1 for success, 0 at end of file, or an error status.
+;---
+s_getc:	tstl	fcb_mode(r8)
+	bneq	50$
+	cmpl	fcb_pos(r8),fcb_size(r8) ; stream mode
+	blss	10$
+	clrl	r0
+	rsb
+10$:	jsb	s_sload
+	blbc	r0,20$
+	bicl3	#^c<511>,fcb_pos(r8),r1
+	movzbl	fcb_blk(r8)[r1],r1
+	incl	fcb_pos(r8)
+	movl	#1,r0
+20$:	rsb
+50$:	jsb	s_rload			; record mode
+	blbc	r0,70$
+	movl	fcb_roff(r8),r1
+	cmpl	r1,fcb_rlen(r8)
+	blss	60$
+	movl	#10,r1			; the end of the record
+	brb	65$
+60$:	movzbl	fcb_rec(r8)[r1],r1
+65$:	incl	fcb_roff(r8)
+	incl	fcb_pos(r8)
+70$:	rsb
+
+;+++
+;s> s_ateof -- r0 = 1 if the file r8 is at its end, else 0 (or an error
+;	status, which is even).
+;---
+s_ateof:
+	tstl	fcb_mode(r8)
+	bneq	10$
+	clrl	r0
+	cmpl	fcb_pos(r8),fcb_size(r8)
+	blss	5$
+	incl	r0
+5$:	rsb
+10$:	jsb	s_rload
+	blbc	r0,20$
+	clrl	r0			; a byte is waiting
+	rsb
+20$:	tstl	r0
+	bneq	30$
+	movl	#1,r0			; at the end
+	rsb
+30$:	rsb				; an error (even)
+
+;+++
+;s> s_putc -- write the byte r1 to the file r8.  r0 = status.
+;---
+s_putc:	tstl	fcb_mode(r8)
+	bneq	50$
+	pushl	r1			; stream mode
+	jsb	s_sload
+	movl	(sp)+,r1
+	blbc	r0,20$
+	bicl3	#^c<511>,fcb_pos(r8),r2
+	movb	r1,fcb_blk(r8)[r2]
+	movl	#1,fcb_dirty(r8)
+	incl	fcb_pos(r8)
+	cmpl	fcb_pos(r8),fcb_size(r8)
+	bleq	20$
+	movl	fcb_pos(r8),fcb_size(r8)
+20$:	rsb
+50$:	incl	fcb_pos(r8)		; record mode
+	cmpb	r1,#10			; end of a record?
+	beql	s_rput
+	movl	fcb_wlen(r8),r2
+	movb	r1,fcb_wbuf(r8)[r2]
+	incl	r2
+	movl	r2,fcb_wlen(r8)
+	cmpl	r2,#c_recsize
+	bgeq	s_rput
+	movl	#1,r0
+	rsb
+
+;+++
+;s> s_rput -- write what is waiting in the record file r8 as a record.
+;---
+s_rput:	moval	fcb_wbuf(r8),fcb_rab+rab$l_rbf(r8)
+	movw	fcb_wlen(r8),fcb_rab+rab$w_rsz(r8)
+	pushab	fcb_rab(r8)
+	calls	#1,g^sys$put
+	clrl	fcb_wlen(r8)
+	movl	#1,fcb_roff(r8)		; any record read is gone
+	clrl	fcb_rlen(r8)
+	rsb
+
+;+++
+;s> s_fflush -- write out what is waiting for the file r8.  r0 = status.
+;---
+s_fflush:
+	tstl	fcb_mode(r8)
+	bneq	10$
+	tstl	fcb_dirty(r8)
+	beql	20$
+	brw	s_swrite
+10$:	tstl	fcb_wlen(r8)
+	bneq	s_rput
+20$:	movl	#1,r0
+	rsb
+
+	newpage	<Reading and Writing Files>
+;+++
+;i> READ-FILE -- ( c-addr u1 fileid -- u2 ior )
+;---
+	defword	readfile,^~READ-FILE~
+	movl	(r11)+,r8
+	movl	(r11)+,r7
+	movl	(r11),r6
+	clrl	-(sp)			; bytes read
+	movl	#1,-(sp)		; status
+10$:	cmpl	4(sp),r7
+	bgeq	30$
+	jsb	s_getc
+	blbc	r0,20$
+	movb	r1,(r6)+
+	incl	4(sp)
+	brb	10$
+20$:	movl	r0,(sp)			; end of file (0) or an error
+30$:	movl	(sp)+,r0
+	movl	(sp)+,(r11)
+	jsb	s_ior
+	movl	r0,-(r11)
+	rsb
+
+;+++
+;s> s_readline -- read a line from the file r8 into r6, at most r7 bytes.
+;	out: r7 = its length, r0 = 1 for a line, 0 at the end of the file,
+;	or an error status.
+;---
+s_readline:
+	jsb	s_ateof
+	blbc	r0,5$
+	clrl	r7			; at the end
+	clrl	r0
+	rsb
+5$:	tstl	r0
+	beql	7$
+	rsb				; an error
+7$:	clrl	r5			; length
+10$:	cmpl	r5,r7
+	bgeq	40$			; the buffer is full
+	pushl	r5
+	jsb	s_getc
+	movl	(sp)+,r5
+	blbc	r0,30$
+	cmpb	r1,#10			; end of the line?
+	beql	40$
+	movb	r1,(r6)[r5]
+	incl	r5
+	brb	10$
+30$:	tstl	r0			; end of file ends the line
+	bneq	50$
+40$:	tstl	r5			; drop a CR before the LF
+	beql	45$
+	cmpb	-1(r6)[r5],#13
+	bneq	45$
+	decl	r5
+45$:	movl	r5,r7
+	movl	#1,r0
+50$:	rsb
+
+;+++
+;i> READ-LINE -- ( c-addr u1 fileid -- u2 flag ior )
+;---
+	defword	readline,^~READ-LINE~
+	movl	(r11)+,r8
+	movl	(r11)+,r7
+	movl	(r11),r6
+	jsb	s_readline
+	movl	r7,(r11)
+	tstl	r0
+	beql	20$			; end of file
+	blbc	r0,30$			; error
+	mnegl	#1,-(r11)
+	clrl	-(r11)
+	rsb
+20$:	clrl	-(r11)
+	clrl	-(r11)
+	rsb
+30$:	clrl	-(r11)
+	movl	r0,-(r11)
+	rsb
+
+;+++
+;s> s_write -- write r7 bytes at r6 to the file r8.  r0 = ior.
+;---
+s_write:
+	tstl	r7
+	bleq	20$
+10$:	movzbl	(r6)+,r1
+	jsb	s_putc
+	blbc	r0,30$
+	sobgtr	r7,10$
+20$:	clrl	r0
+30$:	brw	s_ior
+
+;+++
+;i> WRITE-FILE -- ( c-addr u fileid -- ior )
+;---
+	defword	writefile,^~WRITE-FILE~
+	movl	(r11)+,r8
+	movl	(r11)+,r7
+	movl	(r11),r6
+	jsb	s_write
+	movl	r0,(r11)
+	rsb
+
+;+++
+;i> WRITE-LINE -- ( c-addr u fileid -- ior )
+;---
+	defword	writeline,^~WRITE-LINE~
+	movl	(r11)+,r8
+	movl	(r11)+,r7
+	movl	(r11),r6
+	jsb	s_write
+	tstl	r0
+	bneq	10$
+	movl	#10,r1
+	jsb	s_putc
+	jsb	s_ior
+10$:	movl	r0,(r11)
+	rsb
+
+	newpage	<Positions and Sizes>
+;+++
+;i> FILE-POSITION -- ( fileid -- ud ior )
+;---
+	defword	fileposition,^~FILE-POSITION~
+	movl	(r11),r8
+	movl	fcb_pos(r8),(r11)
+	clrl	-(r11)
+	clrl	-(r11)
+	rsb
+
+;+++
+;s> s_rewind -- go back to the start of the record file r8.
+;---
+s_rewind:
+	jsb	s_fflush
+	pushab	fcb_rab(r8)
+	calls	#1,g^sys$rewind
+	clrl	fcb_pos(r8)
+	clrl	fcb_rlen(r8)
+	movl	#1,fcb_roff(r8)
+	rsb
+
+;+++
+;s> s_seek -- move the file r8 to position r2.  r0 = status.
+;---
+s_seek:	tstl	fcb_mode(r8)
+	bneq	10$
+	movl	r2,fcb_pos(r8)		; stream mode: just set it
+	movl	#1,r0
+	rsb
+10$:	cmpl	r2,fcb_pos(r8)		; record mode: back?
+	bgequ	20$
+	pushl	r2
+	jsb	s_rewind
+	movl	(sp)+,r2
+20$:	cmpl	fcb_pos(r8),r2		; read up to it
+	bgequ	30$
+	pushl	r2
+	jsb	s_getc
+	movl	(sp)+,r2
+	blbs	r0,20$
+	tstl	r0
+	bneq	40$
+30$:	movl	#1,r0
+40$:	rsb
+
+;+++
+;i> REPOSITION-FILE -- ( ud fileid -- ior )
+;---
+	defword	repositionfile,^~REPOSITION-FILE~
+	movl	(r11)+,r8
+	tstl	(r11)+			; (high cell)
+	movl	(r11),r2
+	jsb	s_seek
+	jsb	s_ior
+	movl	r0,(r11)
+	rsb
+
+;+++
+;i> FILE-SIZE -- ( fileid -- ud ior )
+;---
+	defword	filesize,^~FILE-SIZE~
+	movl	(r11),r8
+	tstl	fcb_mode(r8)
+	bneq	10$
+	movl	fcb_size(r8),(r11)
+	clrl	-(r11)
+	clrl	-(r11)
+	rsb
+10$:	pushl	fcb_pos(r8)		; record mode: count the bytes
+	jsb	s_rewind
+20$:	jsb	s_getc
+	blbs	r0,20$
+	movl	fcb_pos(r8),r3		; the size
+	movl	(sp)+,r2
+	pushl	r0
+	pushl	r3
+	jsb	s_seek
+	movl	(sp)+,(r11)
+	clrl	-(r11)
+	movl	(sp)+,r0
+	jsb	s_ior
+	movl	r0,-(r11)
+	rsb
+
+;+++
+;i> RESIZE-FILE -- ( ud fileid -- ior )
+;---
+	defword	resizefile,^~RESIZE-FILE~
+	movl	(r11)+,r8
+	tstl	(r11)+
+	movl	(r11),r2		; new size
+	tstl	fcb_mode(r8)
+	beql	10$
+	movl	#rms$_iop,(r11)		; not in record mode
+	rsb
+10$:	cmpl	r2,fcb_size(r8)
+	blss	30$
+	pushl	fcb_pos(r8)		; longer: write zeros at the end
+	movl	fcb_size(r8),fcb_pos(r8)
+20$:	cmpl	fcb_pos(r8),r2
+	bgeq	25$
+	pushl	r2
+	clrl	r1
+	jsb	s_putc
+	movl	(sp)+,r2
+	blbs	r0,20$
+	movl	(sp)+,fcb_pos(r8)
+	jsb	s_ior
+	movl	r0,(r11)
+	rsb
+25$:	movl	(sp)+,fcb_pos(r8)
+	clrl	(r11)
+	rsb
+30$:	movzbl	fcb_fab+fab$b_rfm(r8),r0 ; shorter: truncate it with RMS.
+	cmpl	r0,#fab$c_udf		; $FIND fails on a record with no
+	beql	35$			; terminator, so for a stream file
+	cmpl	r0,#fab$c_fix		; end the last byte, which is going
+	beql	35$			; anyway, with one
+	pushl	fcb_pos(r8)
+	pushl	r2
+	subl3	#1,fcb_size(r8),fcb_pos(r8)
+	movl	#10,r1
+	cmpl	r0,#fab$c_stmcr
+	bneq	32$
+	movl	#13,r1
+32$:	jsb	s_putc
+	movl	(sp)+,r2
+	movl	(sp)+,fcb_pos(r8)
+35$:	pushl	r2
+	jsb	s_fflush
+	clrl	fcb_bvbn(r8)
+	pushab	fcb_fab(r8)
+	calls	#1,g^sys$close
+	movzbl	fcb_fab+fab$b_fac(r8),-(sp) ; save the access
+	movb	#fab$m_get!fab$m_put!fab$m_trn,fcb_fab+fab$b_fac(r8)
+	pushab	fcb_fab(r8)
+	calls	#1,g^sys$open
+	blbc	r0,80$
+	bicl2	#rab$m_bio,fcb_rab+rab$l_rop(r8)
+	movb	#rab$c_rfa,fcb_rab+rab$b_rac(r8)
+	pushab	fcb_rab(r8)
+	calls	#1,g^sys$connect
+	blbc	r0,70$
+	movl	4(sp),r2		; RFA: VBN and offset of the new end
+	ashl	#-9,r2,r0
+	incl	r0
+	movl	r0,fcb_rab+rab$w_rfa(r8)
+	bicl3	#^c<511>,r2,r0
+	movw	r0,fcb_rab+rab$w_rfa+4(r8)
+	pushab	fcb_rab(r8)
+	calls	#1,g^sys$find
+	blbc	r0,70$
+	pushab	fcb_rab(r8)
+	calls	#1,g^sys$truncate
+70$:	pushl	r0
+	pushab	fcb_fab(r8)
+	calls	#1,g^sys$close
+	movl	(sp)+,r0
+80$:	movl	(sp)+,r1		; open it again as before
+	movb	r1,fcb_fab+fab$b_fac(r8)
+	movl	(sp)+,fcb_size(r8)	; the new size
+	pushl	r0			; (the truncation's status)
+	movb	#rab$c_seq,fcb_rab+rab$b_rac(r8)
+	bisl2	#rab$m_bio,fcb_rab+rab$l_rop(r8)
+	pushab	fcb_fab(r8)
+	calls	#1,g^sys$open
+	blbc	r0,90$
+	pushab	fcb_rab(r8)
+	calls	#1,g^sys$connect
+90$:	blbc	r0,95$
+	movl	(sp)+,r0
+	jsb	s_ior
+	movl	r0,(r11)
+	rsb
+95$:	tstl	(sp)+
+	movl	r0,(r11)
+	rsb
+
+;+++
+;i> FLUSH-FILE -- ( fileid -- ior )
+;---
+	defword	flushfile,^~FLUSH-FILE~
+	movl	(r11),r8
+	jsb	s_fflush
+	blbc	r0,10$
+	pushab	fcb_rab(r8)
+	calls	#1,g^sys$flush
+10$:	jsb	s_ior
+	movl	r0,(r11)
+	rsb
+
+	newpage	<Files by Name>
+;+++
+;s> s_namefab -- set up v_tmpfab for the file named r6, r7.
+;---
+s_namefab:
+	movc3	#fab$c_bln,p_fab,v_tmpfab
+	movl	r6,v_tmpfab+fab$l_fna
+	movb	r7,v_tmpfab+fab$b_fns
+	rsb
+
+;+++
+;i> DELETE-FILE -- ( c-addr u -- ior )
+;---
+	defword	deletefile,^~DELETE-FILE~
+	movl	(r11)+,r7
+	movl	(r11),r6
+	jsb	s_namefab
+	pushab	v_tmpfab
+	calls	#1,g^sys$erase
+	jsb	s_ior
+	movl	r0,(r11)
+	rsb
+
+;+++
+;i> RENAME-FILE -- ( c-addr1 u1 c-addr2 u2 -- ior )
+;---
+	defword	renamefile,^~RENAME-FILE~
+	movl	(r11)+,r7
+	movl	(r11)+,r6
+	jsb	s_namefab
+	movc3	#fab$c_bln,v_tmpfab,v_tmpfab2 ; the new name
+	movl	(r11)+,r7
+	movl	(r11),r6
+	jsb	s_namefab		; the old name
+	pushab	v_tmpfab2
+	clrl	-(sp)
+	clrl	-(sp)
+	pushab	v_tmpfab
+	calls	#4,g^sys$rename
+	jsb	s_ior
+	movl	r0,(r11)
+	rsb
+
+;+++
+;i> FILE-STATUS -- ( c-addr u -- x ior )
+;---
+	defword	filestatus,^~FILE-STATUS~
+	movl	(r11),r7
+	movl	4(r11),r6
+	jsb	s_namefab
+	movb	#fab$m_get,v_tmpfab+fab$b_fac
+	movb	#fab$m_shrget!fab$m_shrput!fab$m_upi,v_tmpfab+fab$b_shr
+	pushab	v_tmpfab
+	calls	#1,g^sys$open
+	blbc	r0,10$
+	pushab	v_tmpfab
+	calls	#1,g^sys$close
+10$:	jsb	s_ior
+	clrl	4(r11)
+	movl	r0,(r11)
+	rsb
+
+	newpage	<Including Files>
+;+++
+;s> s_fillline -- read the next line of the file being included into its
+;	line buffer.  r0 = 1 for a line, 0 at the end.
+;---
+s_fillline:
+	movl	v_srcid,r8
+	movl	fcb_pos(r8),fcb_lpos(r8)
+	moval	fcb_lbuf(r8),r6
+	movl	#c_linesize,r7
+	jsb	s_readline
+	blbc	r0,10$
+	moval	fcb_lbuf(r8),v_srcaddr
+	movl	r7,v_srclen
+	incl	fcb_line(r8)
+	movl	#1,r0
+	rsb
+10$:	tstl	r0
+	beql	20$
+	brw	r_throw_r0		; a read error
+20$:	rsb
+
+;+++
+;s> s_includeloop -- interpret each line of the file (an xt for CATCH).
+;---
+s_includeloop:
+10$:	jsb	s_fillline
+	tstl	r0
+	beql	20$
+	clrl	v_toin
+	jsb	interpret
+	brb	10$
+20$:	rsb
+
+;+++
+;i> INCLUDE-FILE -- ( i*x fileid -- j*x ) interpret the file, then close
+;	it.
+;---
+	defword	includefile,^~INCLUDE-FILE~
+	movl	(r11)+,r8
+r_include:
+	pushl	v_blk
+	pushl	v_toin
+	pushl	v_srclen
+	pushl	v_srcaddr
+	pushl	v_srcid
+	movl	r8,v_srcid
+	clrl	v_blk
+	clrl	v_toin
+	clrl	v_srclen
+	clrl	fcb_line(r8)
+	movl	#s_includeloop,-(r11)
+	jsb	catch
+	movl	(r11)+,r0
+	beql	50$
+	pushl	r0			; an error: note where
+	movl	v_srcid,r8
+	moval	fcb_rsa(r8),r6
+	movzbl	fcb_nam+nam$b_rsl(r8),r7
+	movl	fcb_line(r8),r8
+	jsb	s_errwhere
+	movl	v_srcid,r8
+	jsb	s_close
+	movl	(sp)+,r0
+	movl	(sp)+,v_srcid
+	movl	(sp)+,v_srcaddr
+	movl	(sp)+,v_srclen
+	movl	(sp)+,v_toin
+	movl	(sp)+,v_blk
+	brw	r_throw_r0
+50$:	movl	v_srcid,r8
+	jsb	s_close
+	movl	(sp)+,v_srcid
+	movl	(sp)+,v_srcaddr
+	movl	(sp)+,v_srclen
+	movl	(sp)+,v_toin
+	movl	(sp)+,v_blk
+	rsb
+
+;+++
+;s> s_incopen -- open the file r6, r7 for INCLUDED, with the default type
+;	.FTH; throw the ior if it can't be.  r8 = the fcb.
+;---
+s_incopen:
+	movl	#c_famr,r5
+	movl	#1,r4
+	jsb	s_open
+	tstl	r0
+	beql	10$
+	brw	r_throw_r0
+10$:	rsb
+
+;+++
+;s> s_incname -- r6, r7 = the name of the open file r8 without its
+;	version, to remember what has been included.
+;---
+s_incname:
+	moval	fcb_rsa(r8),r6
+	movzbl	fcb_nam+nam$b_rsl(r8),r7
+	locc	#^a/;/,r7,(r6)
+	subl2	r0,r7
+	rsb
+
+;+++
+;s> s_isincluded -- has the file r6, r7 been included?  Z clear if so.
+;---
+s_isincluded:
+	movl	v_included,r8
+10$:	beql	30$
+	movzbl	4(r8),r0
+	cmpl	r0,r7
+	bneq	20$
+	cmpc3	r7,(r6),5(r8)
+	beql	40$
+20$:	movl	(r8),r8
+	brb	10$
+30$:	clrl	r0
+	rsb
+40$:	movl	#1,r0
+	rsb
+
+;+++
+;s> s_remember -- remember that the file r6, r7 has been included.
+;---
+s_remember:
+	movq	r6,-(sp)
+	addl3	#5,r7,v_vmsize
+	pushal	v_vmaddr
+	pushal	v_vmsize
+	calls	#2,g^lib$get_vm
+	movq	(sp)+,r6
+	blbc	r0,10$
+	movl	v_vmaddr,r1
+	movl	v_included,(r1)
+	movl	r1,v_included
+	movb	r7,4(r1)
+	movc3	r7,(r6),5(r1)
+10$:	rsb
+
+;+++
+;i> INCLUDED -- ( i*x c-addr u -- j*x )
+;---
+	defword	included,^~INCLUDED~
+	movl	(r11)+,r7
+	movl	(r11)+,r6
+	jsb	s_incopen
+	movl	r8,-(sp)
+	jsb	s_incname
+	jsb	s_isincluded
+	bneq	10$
+	jsb	s_remember
+10$:	movl	(sp)+,r8
+	brw	r_include
+
+;+++
+;i> INCLUDE -- ( i*x "name" -- j*x )
+;---
+	defword	include,^~INCLUDE~
+	jsb	parsename
+	brb	included
+
+;+++
+;i> REQUIRED -- ( i*x c-addr u -- i*x ) include the file unless it has
+;	been included already.
+;---
+	defword	required,^~REQUIRED~
+	movl	(r11)+,r7
+	movl	(r11)+,r6
+	jsb	s_incopen
+	movl	r8,-(sp)
+	jsb	s_incname
+	jsb	s_isincluded
+	beql	10$
+	movl	(sp)+,r8		; already: close it again
+	jsb	s_close
+	rsb
+10$:	jsb	s_remember
+	movl	(sp)+,r8
+	brw	r_include
+
+;+++
+;i> REQUIRE -- ( i*x "name" -- i*x )
+;---
+	defword	require,^~REQUIRE~
+	jsb	parsename
+	brb	required

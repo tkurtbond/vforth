@@ -1,0 +1,1009 @@
+	newpage	<Core Primitives>
+;******************************************************************************
+;
+; VFCORE.MAR -- the primitive words: stack, arithmetic, logic, comparison,
+; memory and the return stack.
+;
+; A double-cell number has its high cell on top of the stack, so on the
+; stack and in memory (after 2!) the high cell is at the lower address:
+; the reverse of a VAX quadword.  Words that use EMUL, EDIV and ASHQ load
+; the halves into registers.
+;
+;******************************************************************************
+	.psect	vf_code
+
+	newpage	<Stack Words>
+;+++
+;c> DUP -- ( x -- x x )
+;---
+	defword	dup,^~DUP~,inl=1
+	movl	(r11),-(r11)
+dup_e:	rsb
+
+;+++
+;c> DROP -- ( x -- )
+;---
+	defword	drop,^~DROP~,inl=1
+	tstl	(r11)+			; reads it, so underflow is caught
+drop_e:	rsb
+
+;+++
+;c> SWAP -- ( x1 x2 -- x2 x1 )
+;---
+	defword	swap,^~SWAP~,inl=1
+	movl	(r11),r0
+	movl	4(r11),(r11)
+	movl	r0,4(r11)
+swap_e:	rsb
+
+;+++
+;c> OVER -- ( x1 x2 -- x1 x2 x1 )
+;---
+	defword	over,^~OVER~,inl=1
+	movl	4(r11),-(r11)
+over_e:	rsb
+
+;+++
+;c> ROT -- ( x1 x2 x3 -- x2 x3 x1 )
+;---
+	defword	rot,^~ROT~,inl=1
+	movl	8(r11),r0		; x1
+	movl	4(r11),8(r11)
+	movl	(r11),4(r11)
+	movl	r0,(r11)
+rot_e:	rsb
+
+;+++
+;v> -ROT -- ( x1 x2 x3 -- x3 x1 x2 )
+;---
+	defword	mrot,^~-ROT~,inl=1
+	movl	(r11),r0		; x3
+	movl	4(r11),(r11)
+	movl	8(r11),4(r11)
+	movl	r0,8(r11)
+mrot_e:	rsb
+
+;+++
+;c> NIP -- ( x1 x2 -- x2 )
+;---
+	defword	nip,^~NIP~,inl=1
+	movl	(r11)+,(r11)
+nip_e:	rsb
+
+;+++
+;c> TUCK -- ( x1 x2 -- x2 x1 x2 )
+;---
+	defword	tuck,^~TUCK~,inl=1
+	movl	(r11),r0
+	movl	4(r11),(r11)
+	movl	r0,4(r11)
+	movl	r0,-(r11)
+tuck_e:	rsb
+
+;+++
+;c> ?DUP -- ( x -- 0 | x x )
+;---
+	defword	qdup,^~?DUP~,inl=1
+	tstl	(r11)
+	beql	qdup_e
+	movl	(r11),-(r11)
+qdup_e:	rsb
+
+;+++
+;c> 2DUP -- ( x1 x2 -- x1 x2 x1 x2 )
+;---
+	defword	twodup,^~2DUP~,inl=1
+	movq	(r11),-(r11)
+twodup_e: rsb
+
+;+++
+;c> 2DROP -- ( x1 x2 -- )
+;---
+	defword	twodrop,^~2DROP~,inl=1
+	movq	(r11)+,r0
+twodrop_e: rsb
+
+;+++
+;c> 2SWAP -- ( x1 x2 x3 x4 -- x3 x4 x1 x2 )
+;---
+	defword	twoswap,^~2SWAP~,inl=1
+	movq	(r11),r0
+	movq	8(r11),(r11)
+	movq	r0,8(r11)
+twoswap_e: rsb
+
+;+++
+;c> 2OVER -- ( x1 x2 x3 x4 -- x1 x2 x3 x4 x1 x2 )
+;---
+	defword	twoover,^~2OVER~,inl=1
+	movq	8(r11),-(r11)
+twoover_e: rsb
+
+;+++
+;d> 2ROT -- ( x1 x2 x3 x4 x5 x6 -- x3 x4 x5 x6 x1 x2 )
+;---
+	defword	tworot,^~2ROT~,inl=1
+	movq	16(r11),r0
+	movq	8(r11),16(r11)
+	movq	(r11),8(r11)
+	movq	r0,(r11)
+tworot_e: rsb
+
+;+++
+;c> PICK -- ( xu ... x0 u -- xu ... x0 xu )
+;---
+	defword	pick,^~PICK~,inl=1
+	movl	(r11),r0
+	movl	4(r11)[r0],(r11)
+pick_e:	rsb
+
+;+++
+;c> ROLL -- ( xu xu-1 ... x0 u -- xu-1 ... x0 xu )
+;---
+	defword	roll,^~ROLL~
+	movl	(r11)+,r6		; u
+	beql	10$			; 0 ROLL does nothing
+	movl	(r11)[r6],r7		; xu
+	ashl	#2,r6,r0		; bytes to move up one cell
+	movc3	r0,(r11),4(r11)		; MOVC3 copies overlapping fields
+	movl	r7,(r11)		; xu on top
+10$:	rsb
+
+;+++
+;c> DEPTH -- ( -- +n ) number of cells on the data stack.
+;---
+	defword	depth,^~DEPTH~
+	subl3	r11,#vs_dstop,r0
+	ashl	#-2,r0,-(r11)
+	rsb
+
+;+++
+;v> SP@ -- ( -- a ) the data stack pointer.  SP! -- ( a -- ) set it.
+;---
+	defword	spfetch,^~SP@~
+	movl	r11,r0
+	movl	r0,-(r11)
+	rsb
+
+	defword	spstore,^~SP!~
+	movl	(r11),r11
+	rsb
+
+	newpage	<Return Stack Words>
+;******************************************************************************
+;
+; Return stack words.  Compiled, they are inline code working on SP
+; directly.  Their out-of-line code, used if they are EXECUTEd from a
+; definition, takes its return address off first so it works on the
+; caller's return stack.
+;
+;******************************************************************************
+
+;+++
+;c> >R -- ( x -- ) ( R: -- x )
+;---
+	defalt	tor,^~>R~,f_conly
+	movl	(r11)+,-(sp)
+tor_e:
+tor_o:	movl	(sp)+,r0
+	movl	(r11)+,-(sp)
+	jmp	(r0)
+
+;+++
+;c> R> -- ( -- x ) ( R: x -- )
+;---
+	defalt	rfrom,^~R>~,f_conly
+	movl	(sp)+,-(r11)
+rfrom_e:
+rfrom_o: movl	(sp)+,r0
+	movl	(sp)+,-(r11)
+	jmp	(r0)
+
+;+++
+;c> R@ -- ( -- x ) ( R: x -- x )
+;---
+	defalt	rfetch,^~R@~,f_conly
+	movl	(sp),-(r11)
+rfetch_e:
+rfetch_o: movl	4(sp),-(r11)
+	rsb
+
+;+++
+;c> 2>R -- ( x1 x2 -- ) ( R: -- x1 x2 )
+;---
+	defalt	twotor,^~2>R~,f_conly
+	movq	(r11)+,-(sp)
+twotor_e:
+twotor_o: movl	(sp)+,r0
+	movq	(r11)+,-(sp)
+	jmp	(r0)
+
+;+++
+;c> 2R> -- ( -- x1 x2 ) ( R: x1 x2 -- )
+;---
+	defalt	tworfrom,^~2R>~,f_conly
+	movq	(sp)+,-(r11)
+tworfrom_e:
+tworfrom_o: movl (sp)+,r0
+	movq	(sp)+,-(r11)
+	jmp	(r0)
+
+;+++
+;c> 2R@ -- ( -- x1 x2 ) ( R: x1 x2 -- x1 x2 )
+;---
+	defalt	tworfetch,^~2R@~,f_conly
+	movq	(sp),-(r11)
+tworfetch_e:
+tworfetch_o: movq 4(sp),-(r11)
+	rsb
+
+;+++
+;c> I -- ( -- n ) ( R: loop-sys -- loop-sys ) the index of the innermost
+;	DO loop.  The loop parameters on the return stack are
+;	(sp) = index - limit + 2**31 and 4(sp) = limit + 2**31,
+;	so the index is their sum and the loop ends when adding the
+;	increment to (sp) overflows.
+;---
+	defalt	i,^~I~,f_conly
+	addl3	(sp),4(sp),-(r11)
+i_e:
+i_o:	addl3	4(sp),8(sp),-(r11)
+	rsb
+
+;+++
+;c> J -- ( -- n ) the index of the next outer DO loop.
+;---
+	defalt	j,^~J~,f_conly
+	addl3	8(sp),12(sp),-(r11)
+j_e:
+j_o:	addl3	12(sp),16(sp),-(r11)
+	rsb
+
+;+++
+;c> UNLOOP -- ( -- ) ( R: loop-sys -- ) discard the loop parameters.
+;---
+	defalt	unloop,^~UNLOOP~,f_conly
+	addl2	#8,sp
+unloop_e:
+unloop_o: movl	(sp)+,r0
+	addl2	#8,sp
+	jmp	(r0)
+
+;+++
+;t> N>R -- ( i*n +n -- ) ( R: -- j*x +n ) move n items and n to the return
+;	stack.
+;---
+	defword	ntor,^~N>R~,f_conly
+	movl	(sp)+,r2		; our return address
+	movl	(r11)+,r1		; n
+	movl	r1,r0
+	beql	20$
+10$:	movl	-4(r11)[r0],-(sp)	; deepest item first
+	sobgtr	r0,10$
+	moval	(r11)[r1],r11		; drop them
+20$:	pushl	r1
+	jmp	(r2)
+
+;+++
+;t> NR> -- ( -- i*x +n ) ( R: j*x +n -- ) move them back.
+;---
+	defword	nrfrom,^~NR>~,f_conly
+	movl	(sp)+,r2
+	movl	(sp)+,r1		; n
+	beql	20$
+	ashl	#2,r1,r3		; make room for them
+	subl2	r3,r11
+	clrl	r0
+10$:	movl	(sp)+,(r11)[r0]		; the top one, pushed last, on top
+	aoblss	r1,r0,10$
+20$:	movl	r1,-(r11)
+	jmp	(r2)
+
+	newpage	<Arithmetic>
+;+++
+;c> + -- ( n1 n2 -- n3 )
+;---
+	defword	w_plus,^~+~,inl=1
+	addl2	(r11)+,(r11)
+w_plus_e: rsb
+
+;+++
+;c> - -- ( n1 n2 -- n3 )
+;---
+	defword	w_minus,^~-~,inl=1
+	subl2	(r11)+,(r11)
+w_minus_e: rsb
+
+;+++
+;c> * -- ( n1 n2 -- n3 )
+;---
+	defword	w_star,^~*~,inl=1
+	mull2	(r11)+,(r11)
+w_star_e: rsb
+
+;+++
+;c> / -- ( n1 n2 -- n3 ) symmetric division.
+;---
+	defword	w_slash,^~/~,inl=1
+	divl2	(r11)+,(r11)
+w_slash_e: rsb
+
+;+++
+;c> MOD -- ( n1 n2 -- n3 ) remainder of symmetric division.
+;---
+	defword	mod,^~MOD~
+	movl	(r11)+,r1		; n2
+	movl	(r11),r2		; n1
+	divl3	r1,r2,r0		; n1/n2
+	mull2	r1,r0
+	subl3	r0,r2,(r11)
+	rsb
+
+;+++
+;c> /MOD -- ( n1 n2 -- n3 n4 ) remainder n3 and quotient n4.
+;---
+	defword	slashmod,^~/MOD~
+	movl	(r11),r1		; n2
+	movl	4(r11),r2		; n1
+	divl3	r1,r2,r0		; quotient
+	movl	r0,(r11)
+	mull2	r1,r0
+	subl3	r0,r2,4(r11)		; remainder
+	rsb
+
+;+++
+;c> NEGATE -- ( n -- -n )
+;---
+	defword	negate,^~NEGATE~,inl=1
+	mnegl	(r11),(r11)
+negate_e: rsb
+
+;+++
+;c> ABS -- ( n -- u )
+;---
+	defword	abs,^~ABS~,inl=1
+	tstl	(r11)
+	bgeq	abs_e
+	mnegl	(r11),(r11)
+abs_e:	rsb
+
+;+++
+;c> MIN -- ( n1 n2 -- n3 )
+;---
+	defword	min,^~MIN~,inl=1
+	cmpl	(r11),4(r11)
+	bgeq	1$
+	movl	(r11),4(r11)
+1$:	tstl	(r11)+
+min_e:	rsb
+
+;+++
+;c> MAX -- ( n1 n2 -- n3 )
+;---
+	defword	max,^~MAX~,inl=1
+	cmpl	(r11),4(r11)
+	bleq	1$
+	movl	(r11),4(r11)
+1$:	tstl	(r11)+
+max_e:	rsb
+
+;+++
+;c> 1+ -- ( n -- n+1 )
+;---
+	defword	oneplus,^~1+~,inl=1
+	incl	(r11)
+oneplus_e: rsb
+
+;+++
+;c> 1- -- ( n -- n-1 )
+;---
+	defword	oneminus,^~1-~,inl=1
+	decl	(r11)
+oneminus_e: rsb
+
+;+++
+;c> 2* -- ( x -- x*2 )
+;---
+	defword	twostar,^~2*~,inl=1
+	ashl	#1,(r11),(r11)
+twostar_e: rsb
+
+;+++
+;c> 2/ -- ( x -- x/2 ) arithmetic shift right.
+;---
+	defword	twoslash,^~2/~,inl=1
+	ashl	#-1,(r11),(r11)
+twoslash_e: rsb
+
+;+++
+;c> LSHIFT -- ( x1 u -- x2 )
+;---
+	defword	lshift,^~LSHIFT~
+	movl	(r11)+,r0
+	cmpl	r0,#32
+	bgequ	10$
+	ashl	r0,(r11),(r11)
+	rsb
+10$:	clrl	(r11)
+	rsb
+
+;+++
+;c> RSHIFT -- ( x1 u -- x2 ) logical shift right.
+;---
+	defword	rshift,^~RSHIFT~
+	movl	(r11)+,r0
+	cmpl	r0,#32
+	bgequ	10$
+	subl3	r0,#32,r1		; bits left
+	movl	(r11),r2
+	extzv	r0,r1,r2,(r11)
+	rsb
+10$:	clrl	(r11)
+	rsb
+
+;+++
+;c> CELL+ -- ( a -- a+4 )  CELLS -- ( n -- n*4 )  CHAR+  CHARS
+;---
+	defword	cellplus,^~CELL+~,inl=1
+	addl2	#4,(r11)
+cellplus_e: rsb
+
+	defword	cells,^~CELLS~,inl=1
+	ashl	#2,(r11),(r11)
+cells_e: rsb
+
+	defword	charplus,^~CHAR+~,inl=1
+	incl	(r11)
+charplus_e: rsb
+
+	defword	chars,^~CHARS~,inl=1
+chars_e: rsb
+
+;+++
+;c> S>D -- ( n -- d )
+;---
+	defword	stod,^~S>D~,inl=1
+	ashl	#-31,(r11),-(r11)
+stod_e:	rsb
+
+;+++
+;c> M* -- ( n1 n2 -- d )
+;---
+	defword	mstar,^~M*~
+	emul	(r11),4(r11),#0,r0
+	movl	r0,4(r11)		; low cell
+	movl	r1,(r11)		; high cell on top
+	rsb
+
+;+++
+;c> UM* -- ( u1 u2 -- ud )
+;---
+	defword	umstar,^~UM*~
+	movl	(r11),r2
+	movl	4(r11),r3
+	emul	r2,r3,#0,r0		; signed product
+	tstl	r2			; correct it for unsigned operands
+	bgeq	10$
+	addl2	r3,r1
+10$:	tstl	r3
+	bgeq	20$
+	addl2	r2,r1
+20$:	movl	r0,4(r11)
+	movl	r1,(r11)
+	rsb
+
+;+++
+;s> s_umdiv -- unsigned 64 by 32 bit division.
+;	in:	r2 = low dividend, r3 = high dividend, r4 = divisor
+;	out:	r2 = quotient, r3 = remainder
+;	The quotient must fit in 32 bits (r3 < r4).  Uses r5.
+;---
+s_umdiv:
+	tstl	r4
+	bneq	5$
+	throw	t_divzero
+5$:	movl	#32,r5
+10$:	tstl	r3			; top bit of the remainder set?
+	blss	30$			; yes, so it is surely >= divisor
+	ashq	#1,r2,r2		; shift r3:r2 left a bit
+	cmpl	r3,r4
+	blssu	20$			; remainder < divisor
+	subl2	r4,r3
+	bisl2	#1,r2			; quotient bit
+20$:	sobgtr	r5,10$
+	rsb
+30$:	ashq	#1,r2,r2
+	subl2	r4,r3			; the 33-bit remainder minus divisor
+	bisl2	#1,r2
+	sobgtr	r5,10$
+	rsb
+
+;+++
+;c> UM/MOD -- ( ud u1 -- u2 u3 ) remainder u2, quotient u3.
+;---
+	defword	umslashmod,^~UM/MOD~
+	movl	(r11)+,r4		; divisor
+	movl	(r11),r3		; high
+	movl	4(r11),r2		; low
+	jsb	s_umdiv
+	movl	r3,4(r11)		; remainder
+	movl	r2,(r11)		; quotient
+	rsb
+
+;+++
+;c> SM/REM -- ( d n1 -- n2 n3 ) symmetric: remainder n2, quotient n3.
+;---
+	defword	smslashrem,^~SM/REM~
+	movl	(r11)+,r4		; divisor
+	bneq	5$
+	throw	t_divzero
+5$:	movl	4(r11),r0		; low
+	movl	(r11),r1		; high
+	ediv	r4,r0,r2,r3		; quotient r2, remainder r3
+	movl	r3,4(r11)
+	movl	r2,(r11)
+	rsb
+
+;+++
+;c> FM/MOD -- ( d n1 -- n2 n3 ) floored: remainder n2, quotient n3.
+;---
+	defword	fmslashmod,^~FM/MOD~
+	movl	(r11)+,r4		; divisor
+	bneq	5$
+	throw	t_divzero
+5$:	movl	4(r11),r0
+	movl	(r11),r1
+	ediv	r4,r0,r2,r3
+	tstl	r3			; any remainder?
+	beql	10$			; no
+	xorl3	r3,r4,r0		; signs of remainder and divisor differ?
+	bgeq	10$			; no
+	decl	r2			; yes, floor the quotient
+	addl2	r4,r3			; and move the remainder
+10$:	movl	r3,4(r11)
+	movl	r2,(r11)
+	rsb
+
+;+++
+;c> */MOD -- ( n1 n2 n3 -- n4 n5 ) n1*n2/n3, remainder n4, quotient n5,
+;	with a double intermediate product, symmetric.
+;---
+	defword	starslashmod,^~*/MOD~
+	movl	(r11)+,r4		; n3
+	bneq	5$
+	throw	t_divzero
+5$:	emul	(r11),4(r11),#0,r0
+	ediv	r4,r0,r2,r3
+	movl	r3,4(r11)
+	movl	r2,(r11)
+	rsb
+
+;+++
+;c> */ -- ( n1 n2 n3 -- n4 )
+;---
+	defword	starslash,^~*/~
+	movl	(r11)+,r4
+	bneq	5$
+	throw	t_divzero
+5$:	emul	(r11)+,(r11),#0,r0
+	ediv	r4,r0,(r11),r3
+	rsb
+
+	newpage	<Logic and Comparison>
+;+++
+;c> AND OR XOR INVERT
+;---
+	defword	and,^~AND~,inl=1
+	mcoml	(r11)+,r0
+	bicl2	r0,(r11)
+and_e:	rsb
+
+	defword	or,^~OR~,inl=1
+	bisl2	(r11)+,(r11)
+or_e:	rsb
+
+	defword	xor,^~XOR~,inl=1
+	xorl2	(r11)+,(r11)
+xor_e:	rsb
+
+	defword	invert,^~INVERT~,inl=1
+	mcoml	(r11),(r11)
+invert_e: rsb
+
+;+++
+;c> TRUE FALSE -- ( -- f )
+;---
+	defword	true,^~TRUE~,inl=1
+	mnegl	#1,-(r11)
+true_e:	rsb
+
+	defword	false,^~FALSE~,inl=1
+	clrl	-(r11)
+false_e: rsb
+
+;+++
+;c> 0= -- ( x -- f )
+;---
+	defword	zeq,^~0=~,inl=1
+	tstl	(r11)
+	beql	1$
+	clrl	(r11)
+	brb	zeq_e
+1$:	mnegl	#1,(r11)
+zeq_e:	rsb
+
+;+++
+;c> 0<> -- ( x -- f )
+;---
+	defword	zne,^~0<>~,inl=1
+	tstl	(r11)
+	beql	zne_e
+	mnegl	#1,(r11)
+zne_e:	rsb
+
+;+++
+;c> 0< -- ( n -- f )
+;---
+	defword	zless,^~0<~,inl=1
+	ashl	#-31,(r11),(r11)
+zless_e: rsb
+
+;+++
+;c> 0> -- ( n -- f )
+;---
+	defword	zgreater,^~0>~,inl=1
+	tstl	(r11)
+	bgtr	1$
+	clrl	(r11)
+	brb	zgreater_e
+1$:	mnegl	#1,(r11)
+zgreater_e: rsb
+
+;+++
+;c> = -- ( x1 x2 -- f )
+;---
+	defword	w_equal,^~=~,inl=1
+	cmpl	(r11)+,(r11)
+	beql	1$
+	clrl	(r11)
+	brb	w_equal_e
+1$:	mnegl	#1,(r11)
+w_equal_e: rsb
+
+;+++
+;c> <> -- ( x1 x2 -- f )
+;---
+	defword	w_ne,^~<>~,inl=1
+	cmpl	(r11)+,(r11)
+	bneq	1$
+	clrl	(r11)
+	brb	w_ne_e
+1$:	mnegl	#1,(r11)
+w_ne_e:	rsb
+
+;+++
+;c> < -- ( n1 n2 -- f )	 (cmpl x2,x1 sets the codes for x2 - x1)
+;---
+	defword	w_less,^~<~,inl=1
+	cmpl	(r11)+,(r11)
+	bgtr	1$
+	clrl	(r11)
+	brb	w_less_e
+1$:	mnegl	#1,(r11)
+w_less_e: rsb
+
+;+++
+;c> > -- ( n1 n2 -- f )
+;---
+	defword	w_greater,^~>~,inl=1
+	cmpl	(r11)+,(r11)
+	blss	1$
+	clrl	(r11)
+	brb	w_greater_e
+1$:	mnegl	#1,(r11)
+w_greater_e: rsb
+
+;+++
+;c> U< -- ( u1 u2 -- f )
+;---
+	defword	uless,^~U<~,inl=1
+	cmpl	(r11)+,(r11)
+	bgtru	1$
+	clrl	(r11)
+	brb	uless_e
+1$:	mnegl	#1,(r11)
+uless_e: rsb
+
+;+++
+;c> U> -- ( u1 u2 -- f )
+;---
+	defword	ugreater,^~U>~,inl=1
+	cmpl	(r11)+,(r11)
+	blssu	1$
+	clrl	(r11)
+	brb	ugreater_e
+1$:	mnegl	#1,(r11)
+ugreater_e: rsb
+
+;+++
+;c> WITHIN -- ( n1|u1 n2|u2 n3|u3 -- f ) true if n2 <= n1 < n3, with
+;	the ends taken around the circle: (n1-n2) u< (n3-n2).
+;---
+	defword	within,^~WITHIN~,inl=1
+	movl	(r11)+,r0		; n3
+	movl	(r11)+,r1		; n2
+	subl2	r1,r0			; n3-n2
+	subl2	r1,(r11)		; n1-n2
+	cmpl	(r11),r0
+	blssu	1$
+	clrl	(r11)
+	brb	within_e
+1$:	mnegl	#1,(r11)
+within_e: rsb
+
+	newpage	<Memory>
+;+++
+;c> ! -- ( x a -- )
+;---
+	defword	w_store,^~!~,inl=1
+	movl	4(r11),@(r11)+
+	tstl	(r11)+
+w_store_e: rsb
+
+;+++
+;c> @ -- ( a -- x )
+;---
+	defword	w_fetch,^~@~,inl=1
+	movl	@(r11),(r11)
+w_fetch_e: rsb
+
+;+++
+;c> C! -- ( c a -- )
+;---
+	defword	cstore,^~C!~,inl=1
+	movb	4(r11),@(r11)+
+	tstl	(r11)+
+cstore_e: rsb
+
+;+++
+;c> C@ -- ( a -- c )
+;---
+	defword	cfetch,^~C@~,inl=1
+	movzbl	@(r11),(r11)
+cfetch_e: rsb
+
+;+++
+;c> +! -- ( n a -- )
+;---
+	defword	plusstore,^~+!~,inl=1
+	addl2	4(r11),@(r11)+
+	tstl	(r11)+
+plusstore_e: rsb
+
+;+++
+;c> 2! -- ( x1 x2 a -- ) x2 at a, x1 at a+4.
+;---
+	defword	twostore,^~2!~,inl=1
+	movl	(r11)+,r0
+	movq	(r11)+,(r0)
+twostore_e: rsb
+
+;+++
+;c> 2@ -- ( a -- x1 x2 )
+;---
+	defword	twofetch,^~2@~,inl=1
+	movl	(r11)+,r0
+	movq	(r0),-(r11)
+twofetch_e: rsb
+
+;+++
+;v> W@ W! -- 16-bit fetch (zero extended) and store.
+;---
+	defword	wfetch,^~W@~,inl=1
+	movzwl	@(r11),(r11)
+wfetch_e: rsb
+
+	defword	wstore,^~W!~,inl=1
+	movw	4(r11),@(r11)+
+	tstl	(r11)+
+wstore_e: rsb
+
+;+++
+;c> ALIGNED -- ( a -- a-addr )
+;---
+	defword	aligned,^~ALIGNED~,inl=1
+	addl2	#3,(r11)
+	bicl2	#3,(r11)
+aligned_e: rsb
+
+;+++
+;c> ALIGN -- ( -- )
+;---
+	defword	align,^~ALIGN~
+	addl2	#3,v_dp
+	bicl2	#3,v_dp
+	rsb
+
+;+++
+;c> HERE -- ( -- a )
+;---
+	defword	here,^~HERE~
+	movl	v_dp,-(r11)
+	rsb
+
+;+++
+;c> ALLOT -- ( n -- )
+;---
+	defword	allot,^~ALLOT~
+	addl2	(r11)+,v_dp
+	brw	s_checkdict
+
+;+++
+;s> s_checkdict -- throw -8 if the dictionary is (nearly) full, or HERE
+;	has gone below its start.
+;---
+s_checkdict:
+	cmpl	v_dp,#vf_dict_end-c_dictmargin
+	bgtru	10$
+	rsb
+10$:	movl	#vf_dict_end-c_dictmargin,v_dp	; leave some room
+	throw	t_dictover
+
+;+++
+;c> , -- ( x -- )  C, -- ( c -- )
+;---
+	defword	comma,^~,~
+	movl	v_dp,r0
+	movl	(r11)+,(r0)+
+	movl	r0,v_dp
+	rsb
+
+	defword	ccomma,^~C,~
+	movl	v_dp,r0
+	movl	(r11)+,r1
+	movb	r1,(r0)+
+	movl	r0,v_dp
+	rsb
+
+;+++
+;s> s_cb, s_cw, s_cl -- compile the byte, word, longword in r0.
+;	s_cjsb compiles JSB @#r0.  They change only r1.
+;---
+s_cb:	movl	v_dp,r1
+	movb	r0,(r1)+
+	movl	r1,v_dp
+	rsb
+s_cw:	movl	v_dp,r1
+	movw	r0,(r1)+
+	movl	r1,v_dp
+	rsb
+s_cl:	movl	v_dp,r1
+	movl	r0,(r1)+
+	movl	r1,v_dp
+	rsb
+s_cjsb:	movl	v_dp,r1
+	movw	#op_jsb!<adm_abs@8>,(r1)+
+	movl	r0,(r1)+
+	movl	r1,v_dp
+	rsb
+s_cjmp:	movl	v_dp,r1
+	movw	#op_jmp!<adm_abs@8>,(r1)+
+	movl	r0,(r1)+
+	movl	r1,v_dp
+	rsb
+
+;+++
+;c> FILL -- ( a u c -- )
+;---
+	defword	fill,^~FILL~
+	movl	(r11)+,r6		; char
+	movl	(r11)+,r7		; count
+	movl	(r11)+,r3		; address
+10$:	tstl	r7
+	bleq	20$
+	movzwl	#65535,r8
+	cmpl	r7,r8
+	bgequ	15$
+	movl	r7,r8
+15$:	movc5	#0,(r3),r6,r8,(r3)	; r3 is left after the field
+	subl2	r8,r7
+	brb	10$
+20$:	rsb
+
+;+++
+;c> ERASE -- ( a u -- )
+;---
+	defword	erase,^~ERASE~
+	clrl	-(r11)
+	brb	fill
+
+;+++
+;s> BLANK -- ( a u -- )
+;---
+	defword	blank,^~BLANK~
+	movl	#c_bl,-(r11)
+	brb	fill
+
+;+++
+;c> MOVE -- ( a1 a2 u -- ) copy u bytes from a1 to a2, overlapping or not.
+;---
+	defword	move,^~MOVE~
+	movl	(r11)+,r6		; count
+	movl	(r11)+,r3		; to
+	movl	(r11)+,r1		; from
+	jmp	s_move
+
+;+++
+;s> s_move -- copy r6 bytes from (r1) to (r3), overlapping or not.
+;---
+s_move:	tstl	r6
+	bleq	30$
+	cmpl	r1,r3
+	blssu	20$			; copying up: do the top piece first
+10$:	movzwl	#65535,r7		; copy down in pieces of 65535
+	cmpl	r6,r7
+	bgequ	15$
+	movl	r6,r7
+15$:	movc3	r7,(r1),(r3)		; r1 and r3 move past the pieces
+	subl2	r7,r6
+	bneq	10$
+	rsb
+20$:	addl2	r6,r1			; ends of the fields
+	addl2	r6,r3
+25$:	movzwl	#65535,r7
+	cmpl	r6,r7
+	bgequ	27$
+	movl	r6,r7
+27$:	subl2	r7,r1
+	subl2	r7,r3
+	movq	r1,-(sp)		; (r1 and r2)
+	movl	r3,-(sp)
+	movc3	r7,(r1),(r3)
+	movl	(sp)+,r3
+	movq	(sp)+,r1
+	subl2	r7,r6
+	bneq	25$
+30$:	rsb
+
+;+++
+;s> CMOVE -- ( a1 a2 u -- ) copy from low addresses up, a byte at a time.
+;---
+	defword	cmove,^~CMOVE~
+	movl	(r11)+,r0
+	movl	(r11)+,r2
+	movl	(r11)+,r1
+	tstl	r0
+	bleq	20$
+10$:	movb	(r1)+,(r2)+
+	sobgtr	r0,10$
+20$:	rsb
+
+;+++
+;s> CMOVE> -- ( a1 a2 u -- ) copy from high addresses down.
+;---
+	defword	cmoveup,^~CMOVE>~
+	movl	(r11)+,r0
+	movl	(r11)+,r2
+	movl	(r11)+,r1
+	tstl	r0
+	bleq	20$
+	addl2	r0,r1
+	addl2	r0,r2
+10$:	movb	-(r1),-(r2)
+	sobgtr	r0,10$
+20$:	rsb
+
+;+++
+;c> COUNT -- ( c-addr1 -- c-addr2 u )
+;---
+	defword	count,^~COUNT~,inl=1
+	movl	(r11),r0
+	movzbl	(r0)+,-(r11)
+	movl	r0,4(r11)
+count_e: rsb
+
+;+++
+;c> EXECUTE -- ( i*x xt -- j*x )
+;---
+	defword	execute,^~EXECUTE~
+	jmp	@(r11)+

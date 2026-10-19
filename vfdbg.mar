@@ -1,0 +1,4 @@
+; VFDBG.MAR -- assembled ahead of the other VFORTH sources to build
+; VFORTHDBG.EXE for the debugger, without the condition handler (which
+; would also catch the debugger's own exceptions) or the Ctrl/C AST.
+ca_debug = 0

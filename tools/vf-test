@@ -1,0 +1,19 @@
+#!/bin/sh
+# Runs Forth scripts on the VAX: each is copied to [.VFORTH] and given to
+# VFORTH as SYS$INPUT, and the session is written, without carriage
+# returns, to <script>.out beside it, and printed.
+# VF_IMAGE names another image (default VFORTH).
+#
+#   tools/vf-test <script.fth>...
+here=$(cd "$(dirname "$0")" && pwd)
+for s; do
+  out=${s%.*}.out
+  name=$(basename "$s" | tr a-z A-Z)
+  "$here/vax-put" "$s" || exit 2
+  expect -f "$here/vax-dcl.exp" \
+    "DEFINE/USER SYS\$INPUT $name" \
+    "RUN/NODEBUG ${VF_IMAGE:-VFORTH}" | tr -d '\r' |
+    grep -a -v -e '^SET DEFAULT' -e '^VFDCL> DEFINE/USER' >"$out"
+  echo "=== $s"
+  cat "$out"
+done

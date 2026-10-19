@@ -1,0 +1,679 @@
+	newpage	<Terminal Input and Output>
+;******************************************************************************
+;
+; VFTERM.MAR -- the user input device and the user output device.
+;
+; Output collects in v_obuf.  When SYS$OUTPUT is a terminal, it is written
+; with $QIOW as it is, a newline (LF) going out as CR LF, whenever a line
+; ends, the buffer fills, or VFORTH waits for input.  Otherwise each line
+; is written as a record with LIB$PUT_OUTPUT.
+;
+; Input lines come from SMG$READ_COMPOSED_LINE when SYS$INPUT is a
+; terminal, which gives line editing and recall of earlier lines with the
+; arrow keys, and otherwise from LIB$GET_INPUT.  KEY, KEY? and EKEY use
+; $QIOW on a channel to the terminal.  Ctrl/C delivers an AST that cancels
+; a read in progress or signals SS$_CONTROLC, which the condition handler
+; turns into THROW -28 (user interrupt).
+;
+;******************************************************************************
+	.psect	vf_code
+
+;+++
+;s> s_flush -- write out the output buffer if SYS$OUTPUT is a terminal.
+;	s_endline -- end the line: a CR LF on a terminal, else a record.
+;	s_flushall -- write out everything, even a partial line.
+;	All preserve r2-r11.
+;---
+s_flush:
+	tstl	v_olen
+	beql	10$
+	tstl	v_outterm
+	beql	10$
+	pushr	#^m<r2,r3,r4,r5,r6,r7,r8>
+	$qiow_s	efn=#2,chan=v_outchan,func=#io$_writevblk,iosb=v_iosb,-
+		p1=v_obuf,p2=v_olen
+	clrl	v_olen
+	popr	#^m<r2,r3,r4,r5,r6,r7,r8>
+	jsb	s_chkint
+10$:	rsb
+
+s_putrec:
+	pushr	#^m<r2,r3,r4,r5,r6,r7,r8>
+	movw	v_olen,v_tmpdsc
+	moval	v_obuf,v_tmpdsc+4
+	pushaq	v_tmpdsc
+	calls	#1,g^lib$put_output
+	clrl	v_olen
+	popr	#^m<r2,r3,r4,r5,r6,r7,r8>
+	brw	s_chkint
+
+s_endline:
+	tstl	v_outterm
+	beql	s_putrec
+	movl	#13,r0
+	jsb	s_store
+	movl	#10,r0
+	jsb	s_store
+	brw	s_flush
+
+s_flushall:
+	tstl	v_outterm
+	beql	.+4
+	brw	s_flush
+	tstl	v_olen
+	bneq	s_putrec
+	rsb
+
+;+++
+;s> s_emit -- output the character in r0.  Preserves r2-r11.
+;	s_store -- store it in the buffer, writing the buffer if it fills.
+;---
+s_emit:	cmpb	r0,#10			; newline?
+	beql	s_endline		; yes, end the line
+s_store:
+	movl	v_olen,r1
+	movb	r0,v_obuf[r1]
+	incl	r1
+	movl	r1,v_olen
+	cmpl	r1,#c_outsize
+	bgeq	10$
+	rsb
+10$:	tstl	v_outterm
+	beql	.+4
+	brw	s_flush
+	brw	s_putrec
+
+;+++
+;c> EMIT -- ( c -- )
+;---
+	defword	emit,^~EMIT~
+	movl	(r11)+,r0
+	brb	s_emit
+
+;+++
+;c> TYPE -- ( c-addr u -- )
+;---
+	defword	type,^~TYPE~
+	movl	(r11)+,r7
+	movl	(r11)+,r6
+	tstl	r7
+	bleq	20$
+10$:	movzbl	(r6)+,r0
+	jsb	s_emit
+	sobgtr	r7,10$
+20$:	rsb
+
+;+++
+;c> CR -- ( -- )
+;---
+	defword	cr,^~CR~
+	brw	s_endline
+
+;+++
+;c> SPACE -- ( -- )
+;---
+	defword	space,^~SPACE~
+	movl	#c_bl,r0
+	brw	s_emit
+
+;+++
+;c> SPACES -- ( n -- )
+;---
+	defword	spaces,^~SPACES~
+	movl	(r11)+,r7
+	bleq	20$
+10$:	movl	#c_bl,r0
+	jsb	s_emit
+	sobgtr	r7,10$
+20$:	rsb
+
+;+++
+;f> EMIT? -- ( -- flag ) output is always possible.
+;---
+	defword	emitq,^~EMIT?~
+	mnegl	#1,-(r11)
+	rsb
+
+;+++
+;c> BL -- ( -- c )
+;---
+	defword	bl,^~BL~,inl=1
+	movl	#c_bl,-(r11)
+bl_e:	rsb
+
+	newpage	<Line Input>
+;+++
+;s> s_getline -- read a line from the user input device.
+;	in:	r6 = buffer, r7 = its size (at most 65535)
+;	out:	r7 = length of the line, r0 = 0, or -1 at end of input
+;	Throws -28 if Ctrl/C cancelled the read.
+;---
+s_getline:
+	jsb	s_flushall
+	movw	r7,v_tmpdsc
+	movl	r6,v_tmpdsc+4
+	clrw	v_tmplen
+	tstl	v_kbid			; read with SMG?
+	beql	50$			; no
+	movl	#1,v_reading
+	pushaw	v_tmplen		; resultant length
+	clrl	-(sp)			; no prompt
+	pushaq	v_tmpdsc		; result string
+	clrl	-(sp)			; no key table
+	pushal	v_kbid
+	calls	#5,g^smg$read_composed_line
+	clrl	v_reading
+	tstl	v_ctrlc			; cancelled by Ctrl/C?
+	bneq	80$			; yes
+	cmpl	r0,#smg$_eof		; end of input (Ctrl/Z)?
+	beql	70$			; yes
+	brb	60$
+50$:	pushaw	v_tmplen
+	clrl	-(sp)
+	pushaq	v_tmpdsc
+	calls	#3,g^lib$get_input
+	cmpl	r0,#rms$_eof
+	beql	70$
+60$:	movzwl	v_tmplen,r7
+	clrl	r0
+	rsb
+70$:	clrl	r7			; end of input
+	movl	#1,v_eof
+	mnegl	#1,r0
+	rsb
+80$:	clrl	v_ctrlc
+	throw	t_interrupt
+
+;+++
+;c> ACCEPT -- ( c-addr +n1 -- +n2 )
+;---
+	defword	accept,^~ACCEPT~
+	movl	(r11)+,r7
+	movl	(r11),r6
+	cmpl	r7,#65535
+	bleq	10$
+	movzwl	#65535,r7
+10$:	tstl	r7
+	bgtr	20$
+	clrl	(r11)
+	rsb
+20$:	jsb	s_getline
+	movl	r7,(r11)
+	rsb
+
+	newpage	<Single Keys>
+;+++
+;s> s_readkey -- read one character from the terminal without echo into
+;	r0.  r1 = timeout in seconds, or -1 for none.  r0 = -1 on timeout.
+;---
+	.psect	vf_data
+v_noterm:	.long	0,0		; no terminators: read every character
+	.psect	vf_code
+s_readkey:
+	jsb	s_flushall
+	pushr	#^m<r2,r3,r4,r5,r6,r7,r8>
+	movl	#2,v_reading
+	tstl	r1
+	bgeq	10$
+	$qiow_s	efn=#2,chan=v_ttchan,-
+		func=#<io$_ttyreadall!io$m_noecho>,-
+		iosb=v_iosb,p1=v_keybuf,p2=#1,p4=#v_noterm
+	brb	20$
+10$:	$qiow_s	efn=#2,chan=v_ttchan,-
+		func=#<io$_ttyreadall!io$m_noecho!io$m_timed>,-
+		iosb=v_iosb,p1=v_keybuf,p2=#1,p3=r1,p4=#v_noterm
+20$:	clrl	v_reading
+	popr	#^m<r2,r3,r4,r5,r6,r7,r8>
+	tstl	v_ctrlc
+	bneq	80$
+	cmpw	v_iosb+2,#1		; got a character?
+	blss	30$			; no, it timed out
+	movzbl	v_keybuf,r0
+	rsb
+30$:	mnegl	#1,r0
+	rsb
+80$:	clrl	v_ctrlc
+	throw	t_interrupt
+
+;+++
+;s> s_key -- the next character in r0, from EKEY's pushback, the terminal,
+;	or, if SYS$INPUT is not a terminal, the input lines with an LF
+;	after each.
+;---
+s_key:	movl	v_eklen,r1		; anything pushed back?
+	cmpl	r1,v_eknum
+	bgeq	10$			; no
+	movzbl	v_ekbuf[r1],r0
+	incl	v_eklen
+	rsb
+10$:	tstl	v_interm
+	beql	20$
+	mnegl	#1,r1
+	brw	s_readkey
+20$:	movl	v_keypos,r1		; a line to take it from?
+	bgeq	30$			; yes
+	movq	r6,-(sp)
+	moval	v_keyline,r6
+	movl	#c_tibsize,r7
+	jsb	s_getline
+	movl	r7,v_keylen
+	movq	(sp)+,r6
+	tstl	r0			; end of input?
+	bgeq	25$			; no
+	throw	t_eof
+25$:	clrl	v_keypos
+	clrl	r1
+30$:	cmpl	r1,v_keylen		; at the end of the line?
+	blss	40$
+	mnegl	#1,v_keypos		; yes, next time read a new one
+	movl	#10,r0
+	rsb
+40$:	movzbl	v_keyline[r1],r0
+	incl	v_keypos
+	rsb
+
+;+++
+;c> KEY -- ( -- c )
+;---
+	defword	key,^~KEY~
+	jsb	s_key
+	movl	r0,-(r11)
+	rsb
+
+;+++
+;f> KEY? -- ( -- flag ) true if a character is waiting.
+;---
+	defword	keyq,^~KEY?~
+	cmpl	v_eklen,v_eknum
+	blss	50$
+	tstl	v_interm
+	beql	50$
+	clrq	v_keybuf
+	$qiow_s	efn=#2,chan=v_ttchan,-
+		func=#<io$_sensemode!io$m_typeahdcnt>,-
+		iosb=v_iosb,p1=v_keybuf,p2=#8
+	tstw	v_keybuf		; characters waiting?
+	beql	60$
+50$:	mnegl	#1,-(r11)
+	rsb
+60$:	clrl	-(r11)
+	rsb
+
+	newpage	<Extended Keys>
+;******************************************************************************
+;
+; EKEY returns a character, or one of the K- constants for a key that sends
+; an escape sequence, decoded from the VT100/VT220 sequences:
+;	ESC [ A..D (arrows), ESC O P..S (PF1-PF4 as F1-F4), ESC [ n ~ (the
+;	editing keypad and F5-F12), and ESC [ 1 ; m X with modifiers m.
+; A function key is k_base + n, possibly ORed with the shift, alt and
+; control masks.
+;
+;******************************************************************************
+k_base		= ^x10000
+k_shift		= ^x100000
+k_alt		= ^x200000
+k_ctrl		= ^x400000
+k_left		= k_base+1
+k_right		= k_base+2
+k_up		= k_base+3
+k_down		= k_base+4
+k_home		= k_base+5
+k_end		= k_base+6
+k_prior		= k_base+7
+k_next		= k_base+8
+k_insert	= k_base+9
+k_delete	= k_base+10
+k_f1		= k_base+11		; F1 to F12 are k_f1 to k_f1+11
+
+;+++
+;s> s_ekey -- read an extended key into r0.
+;---
+s_ekey:	jsb	s_key
+	cmpl	r0,#27			; escape?
+	beql	5$
+	rsb
+5$:	tstl	v_interm		; only decode keys from a terminal
+	bneq	6$
+	rsb
+6$:	movl	#1,r1
+	jsb	s_readkey		; next character within a second
+	tstl	r0
+	bgeq	8$
+	movl	#27,r0			; nothing: it was just the Escape key
+	rsb
+8$:	cmpl	r0,#^a/O/		; SS3?
+	bneq	20$
+	movl	#1,r1
+	jsb	s_readkey
+	movl	r0,r8			; final character
+	clrl	r7			; no number
+	movl	#1,r6			; no modifier
+	brw	50$
+20$:	cmpl	r0,#^a/[/		; CSI?
+	beql	25$
+	movb	r0,v_ekbuf		; neither: push it back after ESC
+	movl	#1,v_eknum
+	clrl	v_eklen
+	movl	#27,r0
+	rsb
+25$:	clrl	r7			; first parameter
+	movl	#1,r6			; modifier parameter
+	clrl	r5			; which parameter is being read
+30$:	movl	#1,r1
+	jsb	s_readkey
+	tstl	r0
+	bgeq	32$
+	movl	#27,r0
+	rsb
+32$:	cmpl	r0,#^a/;/
+	bneq	35$
+	incl	r5
+	clrl	r6
+	brb	30$
+35$:	subl3	#^a/0/,r0,r1		; digit?
+	cmpl	r1,#9
+	bgtru	40$			; no, it is the final character
+	tstl	r5
+	bneq	37$
+	mull2	#10,r7
+	addl2	r1,r7
+	brb	30$
+37$:	mull2	#10,r6
+	addl2	r1,r6
+	brb	30$
+40$:	movl	r0,r8
+50$:	; r8 = final character, r7 = number, r6 = modifier (1 = none)
+	clrl	r0
+	cmpb	r8,#^a/A/
+	bneq	51$
+	movl	#k_up,r0
+51$:	cmpb	r8,#^a/B/
+	bneq	52$
+	movl	#k_down,r0
+52$:	cmpb	r8,#^a/C/
+	bneq	53$
+	movl	#k_right,r0
+53$:	cmpb	r8,#^a/D/
+	bneq	54$
+	movl	#k_left,r0
+54$:	cmpb	r8,#^a/H/
+	bneq	55$
+	movl	#k_home,r0
+55$:	cmpb	r8,#^a/F/
+	bneq	56$
+	movl	#k_end,r0
+56$:	subl3	#^a/P/,r8,r1		; P Q R S are F1-F4
+	cmpl	r1,#3
+	bgtru	57$
+	addl3	#k_f1,r1,r0
+57$:	cmpb	r8,#^a/~/
+	bneq	70$
+	moval	v_ektilde,r1		; look up the number
+60$:	tstl	(r1)
+	beql	70$
+	cmpl	r7,(r1)+
+	beql	65$
+	tstl	(r1)+
+	brb	60$
+65$:	movl	(r1),r0
+70$:	tstl	r0			; recognized?
+	bneq	75$
+	movl	#27,r0			; no: just say Escape
+	rsb
+75$:	decl	r6			; modifiers: 1 shift, 2 alt, 4 control
+	bleq	80$
+	blbc	r6,76$
+	bisl2	#k_shift,r0
+76$:	bbc	#1,r6,77$
+	bisl2	#k_alt,r0
+77$:	bbc	#2,r6,80$
+	bisl2	#k_ctrl,r0
+80$:	rsb
+
+v_ektilde:				; ESC [ n ~ codes
+	.long	1,k_home,2,k_insert,3,k_delete,4,k_end,5,k_prior,6,k_next
+	.long	7,k_home,8,k_end
+	.long	11,k_f1,12,k_f1+1,13,k_f1+2,14,k_f1+3,15,k_f1+4
+	.long	17,k_f1+5,18,k_f1+6,19,k_f1+7,20,k_f1+8,21,k_f1+9
+	.long	23,k_f1+10,24,k_f1+11
+	.long	0
+
+;+++
+;f> EKEY -- ( -- x )
+;---
+	defword	ekey,^~EKEY~
+	jsb	s_ekey
+	movl	r0,-(r11)
+	rsb
+
+;+++
+;f> EKEY? -- ( -- flag )
+;---
+	defword	ekeyq,^~EKEY?~
+	brw	keyq
+
+;+++
+;f> EKEY>CHAR -- ( x -- x false | char true )
+;---
+	defword	ekeytochar,^~EKEY>CHAR~
+	cmpl	(r11),#255
+	bgtru	10$
+	mnegl	#1,-(r11)
+	rsb
+10$:	clrl	-(r11)
+	rsb
+
+;+++
+;f> EKEY>FKEY -- ( x -- u flag )
+;---
+	defword	ekeytofkey,^~EKEY>FKEY~
+	cmpl	(r11),#k_base
+	blssu	10$
+	mnegl	#1,-(r11)
+	rsb
+10$:	clrl	-(r11)
+	rsb
+
+;+++
+;f> K-LEFT ... K-F12, K-SHIFT-MASK, K-ALT-MASK, K-CTRL-MASK -- ( -- u )
+;---
+	.macro	kconst	lbl,name,value
+	defword	lbl,^~name~,inl=1
+	movl	#value,-(r11)
+lbl'_e:	rsb
+	.endm	kconst
+	kconst	k_left_w,K-LEFT,k_left
+	kconst	k_right_w,K-RIGHT,k_right
+	kconst	k_up_w,K-UP,k_up
+	kconst	k_down_w,K-DOWN,k_down
+	kconst	k_home_w,K-HOME,k_home
+	kconst	k_end_w,K-END,k_end
+	kconst	k_prior_w,K-PRIOR,k_prior
+	kconst	k_next_w,K-NEXT,k_next
+	kconst	k_insert_w,K-INSERT,k_insert
+	kconst	k_delete_w,K-DELETE,k_delete
+	kconst	k_f1_w,K-F1,k_f1
+	kconst	k_f2_w,K-F2,k_f1+1
+	kconst	k_f3_w,K-F3,k_f1+2
+	kconst	k_f4_w,K-F4,k_f1+3
+	kconst	k_f5_w,K-F5,k_f1+4
+	kconst	k_f6_w,K-F6,k_f1+5
+	kconst	k_f7_w,K-F7,k_f1+6
+	kconst	k_f8_w,K-F8,k_f1+7
+	kconst	k_f9_w,K-F9,k_f1+8
+	kconst	k_f10_w,K-F10,k_f1+9
+	kconst	k_f11_w,K-F11,k_f1+10
+	kconst	k_f12_w,K-F12,k_f1+11
+	kconst	k_shift_w,K-SHIFT-MASK,k_shift
+	kconst	k_alt_w,K-ALT-MASK,k_alt
+	kconst	k_ctrl_w,K-CTRL-MASK,k_ctrl
+
+	newpage	<Screen, Time and Date>
+;+++
+;s> s_emitdec -- output r0 (0 or more) in decimal.  Uses r0-r5.
+;---
+s_emitdec:
+	clrl	r1
+	ediv	#10,r0,r2,r3		; r2 = r0/10, r3 = digit
+	pushl	r3
+	tstl	r2
+	beql	10$
+	movl	r2,r0
+	jsb	s_emitdec
+10$:	addl3	#^a/0/,(sp)+,r0
+	brw	s_emit
+
+;+++
+;f> PAGE -- ( -- ) clear the screen.
+;---
+	defword	page,^~PAGE~
+	tstl	v_outterm
+	bneq	10$
+	movl	#12,r0			; form feed
+	brw	s_emit
+10$:	moval	v_clear,r6
+	movl	#7,r7
+	brw	s_typer6
+
+v_clear: .byte	27
+	.ascii	/[H/
+	.byte	27
+	.ascii	/[2J/
+
+;+++
+;s> s_typer6 -- type r7 characters at r6.
+;---
+s_typer6:
+	tstl	r7
+	bleq	20$
+10$:	movzbl	(r6)+,r0
+	jsb	s_emit
+	sobgtr	r7,10$
+20$:	rsb
+
+;+++
+;f> AT-XY -- ( u1 u2 -- ) move to column u1, row u2 (0 based).
+;---
+	defword	atxy,^~AT-XY~
+	movl	#27,r0
+	jsb	s_emit
+	movl	#^a/[/,r0
+	jsb	s_emit
+	addl3	#1,(r11)+,r0		; row
+	jsb	s_emitdec
+	movl	#^a/;/,r0
+	jsb	s_emit
+	addl3	#1,(r11)+,r0		; column
+	jsb	s_emitdec
+	movl	#^a/H/,r0
+	brw	s_emit
+
+;+++
+;f> MS -- ( u -- ) wait u milliseconds.
+;---
+	defword	ms,^~MS~
+	jsb	s_flushall
+	movl	(r11)+,r0
+	bleq	10$
+	emul	#-10000,r0,#0,v_keybuf	; delta time in 100 ns units
+	$setimr_s efn=#3,daytim=v_keybuf,reqidt=#3
+	$waitfr_s efn=#3
+	$cantim_s reqidt=#3		; (if Ctrl/C ended the wait)
+	jsb	s_chkint
+10$:	rsb
+
+;+++
+;f> TIME&DATE -- ( -- +n1 +n2 +n3 +n4 +n5 +n6 ) second minute hour day
+;	month year.
+;---
+	defword	timedate,^~TIME&DATE~
+	$numtim_s timbuf=v_keybuf
+	movzwl	v_keybuf+10,-(r11)	; second
+	movzwl	v_keybuf+8,-(r11)	; minute
+	movzwl	v_keybuf+6,-(r11)	; hour
+	movzwl	v_keybuf+4,-(r11)	; day
+	movzwl	v_keybuf+2,-(r11)	; month
+	movzwl	v_keybuf,-(r11)		; year
+	rsb
+
+	newpage	<Terminal Setup and Ctrl/C>
+;+++
+;s> s_terminit -- find out whether SYS$INPUT and SYS$OUTPUT are
+;	terminals and set up channels, the SMG keyboard and Ctrl/C.
+;---
+s_terminit:
+	$getdviw_s efn=#2,devnam=v_inname,itmlst=v_dviitems
+	blbc	r0,10$
+	cmpl	v_devclass,#dc$_term
+	bneq	10$
+	movl	#1,v_interm
+	$assign_s devnam=v_inname,chan=v_ttchan
+	blbs	r0,5$
+	clrl	v_interm
+	brb	10$
+5$:	pushal	v_kbid
+	calls	#1,g^smg$create_virtual_keyboard
+	blbs	r0,7$
+	clrl	v_kbid
+7$:
+	.if	df	ca_trapping
+	jsb	s_ctrlcon
+	.endc
+10$:	clrl	v_devclass
+	$getdviw_s efn=#2,devnam=v_outname,itmlst=v_dviitems
+	blbc	r0,20$
+	cmpl	v_devclass,#dc$_term
+	bneq	20$
+	$assign_s devnam=v_outname,chan=v_outchan
+	blbc	r0,20$
+	movl	#1,v_outterm
+20$:	rsb
+
+;+++
+;s> s_ctrlcon -- enable the Ctrl/C AST.
+;---
+s_ctrlcon:
+	$qiow_s	efn=#2,chan=v_ttchan,func=#<io$_setmode!io$m_ctrlcast>,-
+		p1=s_ctrlc_ast,p3=#3
+	rsb
+
+;+++
+;s> s_ctrlc_ast -- the Ctrl/C AST.  Enable it again, then cancel the read
+;	in progress, or make the interrupted code THROW -28.  It must not
+;	signal: the handler would unwind out of the AST, and VMS would hold
+;	back every later AST.
+;---
+	.entry	s_ctrlc_ast,^m<r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>
+	$qio_s	efn=#4,chan=v_ttchan,func=#<io$_setmode!io$m_ctrlcast>,-
+		p1=s_ctrlc_ast,p3=#3
+	tstl	v_reading		; waiting for input?
+	beql	50$			; no
+	movl	#1,v_ctrlc
+	cmpl	v_reading,#1		; an SMG read?
+	bneq	20$			; no
+	pushal	v_kbid
+	calls	#1,g^smg$cancel_input
+	ret
+20$:	$cancel_s chan=v_ttchan
+	ret
+50$:	cmpl	12(fp),v_mainfp		; interrupted VFORTH's own code?
+	bneq	60$
+	movl	#t_interrupt,v_sigthrow	; yes: make it continue at
+	moval	r_sigthrow,16(ap)	; r_sigthrow (the AST's arguments
+	bicl2	#psl$m_fpd,20(ap)	; are its saved PC and PSL)
+	ret
+60$:	movl	#1,v_intpend		; no, a library routine or system
+	$setef_s efn=#3			; service: s_chkint will see it
+	ret				; (and end MS's wait)
+
+;+++
+;s> s_chkint -- THROW -28 if Ctrl/C interrupted a library routine or
+;	system service.  Changes nothing else.
+;---
+s_chkint:
+	tstl	v_intpend
+	bneq	10$
+	rsb
+10$:	clrl	v_intpend
+	throw	t_interrupt
