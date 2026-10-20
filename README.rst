@@ -35,6 +35,10 @@ there; ``tools/vf-test script.fth`` runs a script there with VFORTH
 and shows the result.  The account's password is read from
 ``~/.netrc-vtil-vax``.
 
+To move the sources to a VAX some other way, ``make`` (GNU make)
+packs them in ``vforth.zip``; on the VAX, ``UNZIP -a VFORTH.ZIP``
+unpacks it as VMS text files, ready for MMS.
+
 
 Running
 =======
