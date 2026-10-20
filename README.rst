@@ -8,10 +8,12 @@ definition is VAX code, mostly ``JSB`` instructions to the words it
 uses, with small words like ``DUP`` and ``+`` compiled in line and
 constants and variables compiled as literals.
 
-It provides the Core and Core Extension word sets and all of the
-optional word sets: Block, Double-Number, Exception, Facility, File
-Access, Floating-Point, Locals, Memory-Allocation, Programming-Tools,
-Search-Order and String, each with its extensions.  It passes Gerry
+It provides the Core and Core Extension word sets and these optional
+word sets: Block, Double-Number, Exception, Facility, File Access,
+Floating-Point, Locals, Memory-Allocation, Programming-Tools,
+Search-Order and String, each with its extensions except for
+``CODE`` and ``;CODE`` from the Programming-Tools extensions.  It
+does not provide the Extended-Character word set.  It passes Gerry
 Jackson's Forth 2012 test suite with no errors.
 
 .. contents::
@@ -309,7 +311,8 @@ Memory-Allocation
 Programming-Tools
     ``SEE`` shows a colon definition's code, naming the words it calls
     and showing literals and strings; other code is shown as bytes in
-    hex.  ``ASSEMBLER`` and ``EDITOR`` name empty word lists.  ``CS-PICK``
+    hex.  ``ASSEMBLER`` and ``EDITOR`` name empty word lists, and there
+    is no ``CODE`` or ``;CODE``.  ``CS-PICK``
     and ``CS-ROLL`` work on the data stack.  ``FORGET`` and ``MARKER``
     restore the dictionary and the word lists.
 
